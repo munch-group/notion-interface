@@ -83,7 +83,7 @@
           "group": "navigation@2"
         },
         {
-          "command": "notion.toggleTreeView", 
+          "command": "notion.toggleTreeView",
           "when": "view == notion.pageExplorer && notion.viewMode == flat",
           "group": "navigation@3"
         },
@@ -144,7 +144,10 @@
         },
         "notion.viewMode": {
           "type": "string",
-          "enum": ["flat", "tree"],
+          "enum": [
+            "flat",
+            "tree"
+          ],
           "default": "flat",
           "description": "How to display pages in the sidebar: flat list or nested tree"
         },
@@ -183,8 +186,8 @@
     "package": "vsce package"
   },
   "devDependencies": {
-    "@types/vscode": "^1.74.0",
     "@types/node": "16.x",
+    "@types/vscode": "^1.74.0",
     "@typescript-eslint/eslint-plugin": "^6.4.0",
     "@typescript-eslint/parser": "^6.4.0",
     "eslint": "^8.47.0",
@@ -192,6 +195,7 @@
     "vsce": "^2.15.0"
   },
   "dependencies": {
-    "@notionhq/client": "^2.2.15"
+    "@notionhq/client": "^2.2.15",
+    "notion-to-md": "^3.1.9"
   }
 }

@@ -2,12 +2,14 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.NotionService = void 0;
 const client_1 = require("@notionhq/client");
+const notion_to_md_1 = require("notion-to-md");
 const vscode = require("vscode");
 const path = require("path");
 const fs = require("fs");
 class NotionService {
     constructor() {
         this.notion = null;
+        this.n2m = null;
         const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
         this.notionFolderPath = workspaceFolder
             ? path.join(workspaceFolder.uri.fsPath, '.notion')
@@ -27,11 +29,13 @@ class NotionService {
                 throw new Error('Notion API key not configured. Use "Set Notion API Key" command.');
             }
             this.notion = new client_1.Client({ auth: apiKey });
+            this.n2m = new notion_to_md_1.NotionToMarkdown({ notionClient: this.notion });
         }
         return this.notion;
     }
     resetClient() {
         this.notion = null;
+        this.n2m = null;
     }
     async searchPages(query = '') {
         const notion = this.getClient();
@@ -65,12 +69,13 @@ class NotionService {
         const notion = this.getClient();
         try {
             const page = await notion.pages.retrieve({ page_id: pageId });
-            const blocks = await notion.blocks.children.list({
-                block_id: pageId,
-                page_size: 100
-            });
             const title = this.extractPageTitle(page);
-            const content = this.convertBlocksToMarkdown(blocks.results);
+            // Use notion-to-md for better markdown conversion
+            if (!this.n2m) {
+                this.n2m = new notion_to_md_1.NotionToMarkdown({ notionClient: notion });
+            }
+            const mdBlocks = await this.n2m.pageToMarkdown(pageId);
+            const content = this.n2m.toMarkdownString(mdBlocks).parent;
             return { title, content };
         }
         catch (error) {
@@ -241,7 +246,7 @@ class NotionService {
                     object: 'block',
                     type: 'heading_1',
                     heading_1: {
-                        rich_text: [{ type: 'text', text: { content: line.substring(2) } }]
+                        rich_text: this.parseMarkdownToRichText(line.substring(2))
                     }
                 });
             }
@@ -250,7 +255,7 @@ class NotionService {
                     object: 'block',
                     type: 'heading_2',
                     heading_2: {
-                        rich_text: [{ type: 'text', text: { content: line.substring(3) } }]
+                        rich_text: this.parseMarkdownToRichText(line.substring(3))
                     }
                 });
             }
@@ -259,7 +264,7 @@ class NotionService {
                     object: 'block',
                     type: 'heading_3',
                     heading_3: {
-                        rich_text: [{ type: 'text', text: { content: line.substring(4) } }]
+                        rich_text: this.parseMarkdownToRichText(line.substring(4))
                     }
                 });
             }
@@ -268,7 +273,7 @@ class NotionService {
                     object: 'block',
                     type: 'bulleted_list_item',
                     bulleted_list_item: {
-                        rich_text: [{ type: 'text', text: { content: line.substring(2) } }]
+                        rich_text: this.parseMarkdownToRichText(line.substring(2))
                     }
                 });
             }
@@ -277,7 +282,7 @@ class NotionService {
                     object: 'block',
                     type: 'numbered_list_item',
                     numbered_list_item: {
-                        rich_text: [{ type: 'text', text: { content: line.replace(/^\d+\.\s/, '') } }]
+                        rich_text: this.parseMarkdownToRichText(line.replace(/^\d+\.\s/, ''))
                     }
                 });
             }
@@ -304,7 +309,7 @@ class NotionService {
                     object: 'block',
                     type: 'quote',
                     quote: {
-                        rich_text: [{ type: 'text', text: { content: line.substring(2) } }]
+                        rich_text: this.parseMarkdownToRichText(line.substring(2))
                     }
                 });
             }
@@ -320,7 +325,7 @@ class NotionService {
                     object: 'block',
                     type: 'paragraph',
                     paragraph: {
-                        rich_text: [{ type: 'text', text: { content: line } }]
+                        rich_text: this.parseMarkdownToRichText(line)
                     }
                 });
             }
@@ -330,8 +335,68 @@ class NotionService {
     }
     extractTextFromRichText(richText) {
         return richText
-            .map(text => text.plain_text || text.text?.content || '')
+            .map(textObj => {
+            let content = textObj.plain_text || textObj.text?.content || '';
+            // Apply formatting if annotations exist
+            if (textObj.annotations) {
+                const annotations = textObj.annotations;
+                // Apply bold
+                if (annotations.bold) {
+                    content = `**${content}**`;
+                }
+                // Apply italic
+                if (annotations.italic) {
+                    content = `*${content}*`;
+                }
+                // Apply underline (using HTML since markdown doesn't have native underline)
+                if (annotations.underline) {
+                    content = `<u>${content}</u>`;
+                }
+                // Apply strikethrough
+                if (annotations.strikethrough) {
+                    content = `~~${content}~~`;
+                }
+                // Apply code
+                if (annotations.code) {
+                    content = `\`${content}\``;
+                }
+            }
+            return content;
+        })
             .join('');
+    }
+    parseMarkdownToRichText(text) {
+        // Simple markdown parser for basic formatting
+        const richTextArray = [];
+        let currentIndex = 0;
+        // Regular expressions for different formatting
+        const patterns = [
+            { regex: /\*\*(.*?)\*\*/g, annotation: 'bold' },
+            { regex: /\*(.*?)\*/g, annotation: 'italic' },
+            { regex: /<u>(.*?)<\/u>/g, annotation: 'underline' },
+            { regex: /~~(.*?)~~/g, annotation: 'strikethrough' },
+            { regex: /`(.*?)`/g, annotation: 'code' }
+        ];
+        // For simplicity, if no formatting is detected, return plain text
+        let hasFormatting = false;
+        for (const pattern of patterns) {
+            if (pattern.regex.test(text)) {
+                hasFormatting = true;
+                break;
+            }
+        }
+        if (!hasFormatting) {
+            return [{ type: 'text', text: { content: text } }];
+        }
+        // For now, return simplified rich text (full parsing is complex)
+        // This handles the most common case
+        let processedText = text
+            .replace(/\*\*(.*?)\*\*/g, '$1') // Remove bold markers
+            .replace(/\*(.*?)\*/g, '$1') // Remove italic markers  
+            .replace(/<u>(.*?)<\/u>/g, '$1') // Remove underline markers
+            .replace(/~~(.*?)~~/g, '$1') // Remove strikethrough markers
+            .replace(/`(.*?)`/g, '$1'); // Remove code markers
+        return [{ type: 'text', text: { content: processedText } }];
     }
     sanitizeFileName(filename) {
         return filename
