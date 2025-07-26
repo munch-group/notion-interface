@@ -1,0 +1,197 @@
+{
+  "name": "notion-interface",
+  "displayName": "Notion Interface",
+  "description": "Interface with Notion using API key - browse pages, edit in markdown, sync changes",
+  "version": "0.1.0",
+  "publisher": "your-publisher-name",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/your-username/notion-interface.git"
+  },
+  "keywords": [
+    "notion",
+    "markdown",
+    "productivity",
+    "notes",
+    "api"
+  ],
+  "engines": {
+    "vscode": "^1.74.0"
+  },
+  "categories": [
+    "Other",
+    "Notebooks"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "notion.setApiKey",
+        "title": "Set Notion API Key",
+        "category": "Notion",
+        "icon": "$(key)"
+      },
+      {
+        "command": "notion.refreshPages",
+        "title": "Refresh Pages",
+        "category": "Notion",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "notion.toggleFlatView",
+        "title": "Flat List View",
+        "category": "Notion",
+        "icon": "$(list-flat)"
+      },
+      {
+        "command": "notion.toggleTreeView",
+        "title": "Tree View",
+        "category": "Notion",
+        "icon": "$(list-tree)"
+      },
+      {
+        "command": "notion.searchPages",
+        "title": "Search Pages",
+        "category": "Notion",
+        "icon": "$(search)"
+      },
+      {
+        "command": "notion.openPage",
+        "title": "Open Page",
+        "category": "Notion"
+      },
+      {
+        "command": "notion.uploadChanges",
+        "title": "Upload Changes to Notion",
+        "category": "Notion",
+        "icon": "$(cloud-upload)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "notion.searchPages",
+          "when": "view == notion.pageExplorer && notion.viewMode == flat",
+          "group": "navigation@1"
+        },
+        {
+          "command": "notion.toggleFlatView",
+          "when": "view == notion.pageExplorer && notion.viewMode == tree",
+          "group": "navigation@2"
+        },
+        {
+          "command": "notion.toggleTreeView", 
+          "when": "view == notion.pageExplorer && notion.viewMode == flat",
+          "group": "navigation@3"
+        },
+        {
+          "command": "notion.refreshPages",
+          "when": "view == notion.pageExplorer",
+          "group": "navigation@4"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "notion.openPage",
+          "when": "view == notion.pageExplorer && viewItem == notionPage",
+          "group": "inline"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "notion.uploadChanges",
+          "when": "resourceExtname == .md && notion.isNotionFile",
+          "group": "navigation"
+        }
+      ]
+    },
+    "views": {
+      "notion": [
+        {
+          "id": "notion.pageExplorer",
+          "name": "Notion Pages"
+        }
+      ]
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "notion",
+          "title": "Notion",
+          "icon": "$(custom-icons-notion)"
+        }
+      ]
+    },
+    "icons": {
+      "custom-icons-notion": {
+        "description": "notion",
+        "default": {
+          "fontPath": "resources/fonts/custom-icons.woff",
+          "fontCharacter": "\\f101"
+        }
+      }
+    },
+    "configuration": {
+      "title": "Notion Interface",
+      "properties": {
+        "notion.apiKey": {
+          "type": "string",
+          "default": "",
+          "description": "Your Notion Integration API Key"
+        },
+        "notion.viewMode": {
+          "type": "string",
+          "enum": ["flat", "tree"],
+          "default": "flat",
+          "description": "How to display pages in the sidebar: flat list or nested tree"
+        },
+        "notion.autoSync": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically sync changes to Notion when saving"
+        }
+      }
+    },
+    "viewsWelcome": [
+      {
+        "view": "notion.pageExplorer",
+        "contents": "No Notion API key configured.\n[Set API Key](command:notion.setApiKey)",
+        "when": "!notion.hasApiKey"
+      },
+      {
+        "view": "notion.pageExplorer",
+        "contents": "Loading Notion pages...",
+        "when": "notion.hasApiKey && notion.loading"
+      },
+      {
+        "view": "notion.pageExplorer",
+        "contents": "No Notion pages found.\n[Refresh](command:notion.refreshPages)",
+        "when": "notion.hasApiKey && !notion.loading && notion.pageCount == 0"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "pretest": "npm run compile && npm run lint",
+    "lint": "eslint src --ext ts",
+    "test": "node ./out/test/runTest.js",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.74.0",
+    "@types/node": "16.x",
+    "@typescript-eslint/eslint-plugin": "^6.4.0",
+    "@typescript-eslint/parser": "^6.4.0",
+    "eslint": "^8.47.0",
+    "typescript": "^4.9.4",
+    "vsce": "^2.15.0"
+  },
+  "dependencies": {
+    "@notionhq/client": "^2.2.15"
+  }
+}
