@@ -3,6 +3,7 @@ import { NotionToMarkdown } from 'notion-to-md';
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
+import * as os from 'os';
 
 export interface NotionPage {
     id: string;
@@ -10,12 +11,23 @@ export interface NotionPage {
     lastEdited: Date;
     parent?: string;
     url: string;
+    content?: string; // Cached content for search
+    properties?: { [key: string]: any }; // Database properties like tags, labels, etc.
+}
+
+interface CachedPageContent {
+    content: string;
+    lastEdited: string; // ISO string of last edited time
+    cachedAt: string;   // ISO string of when we cached it
+    properties?: { [key: string]: any }; // Cached database properties
 }
 
 export class NotionService {
     private notion: Client | null = null;
     private n2m: NotionToMarkdown | null = null;
     private notionFolderPath: string;
+    private contentCache: Map<string, string> = new Map();
+    private persistentCachePath: string;
 
     constructor() {
         const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
@@ -23,12 +35,31 @@ export class NotionService {
             ? path.join(workspaceFolder.uri.fsPath, '.notion')
             : path.join(process.env.HOME || process.env.USERPROFILE || '', '.notion');
         
+        // Set up persistent cache path
+        this.persistentCachePath = path.join(os.homedir(), '.notion-vscode', 'cache');
+        
         this.ensureNotionFolder();
+        this.ensurePersistentCacheFolder();
     }
 
     private ensureNotionFolder(): void {
         if (!fs.existsSync(this.notionFolderPath)) {
             fs.mkdirSync(this.notionFolderPath, { recursive: true });
+        }
+    }
+
+    private ensurePersistentCacheFolder(): void {
+        if (!fs.existsSync(this.persistentCachePath)) {
+            fs.mkdirSync(this.persistentCachePath, { recursive: true });
+            console.log(`Created persistent cache directory: ${this.persistentCachePath}`);
+        } else {
+            // Debug: show what's in the cache directory
+            try {
+                const files = fs.readdirSync(this.persistentCachePath);
+                console.log(`Cache directory ${this.persistentCachePath} contains ${files.length} files:`, files.slice(0, 5));
+            } catch (error) {
+                console.error('Failed to read cache directory:', error);
+            }
         }
     }
 
@@ -50,9 +81,159 @@ export class NotionService {
     public resetClient(): void {
         this.notion = null;
         this.n2m = null;
+        this.contentCache.clear();
+    }
+
+    public clearCache(): number {
+        // Clear memory cache
+        this.contentCache.clear();
+        
+        // Clear persistent cache
+        try {
+            if (fs.existsSync(this.persistentCachePath)) {
+                const files = fs.readdirSync(this.persistentCachePath);
+                let deletedCount = 0;
+                
+                for (const file of files) {
+                    if (file.endsWith('.json')) {
+                        try {
+                            fs.unlinkSync(path.join(this.persistentCachePath, file));
+                            deletedCount++;
+                        } catch (error) {
+                            console.error(`Failed to delete cache file ${file}:`, error);
+                        }
+                    }
+                }
+                
+                console.log(`Cleared ${deletedCount} cache files from ${this.persistentCachePath}`);
+                return deletedCount;
+            }
+        } catch (error) {
+            console.error('Failed to clear persistent cache:', error);
+        }
+        
+        return 0;
+    }
+
+    private getCacheFilePath(pageId: string): string {
+        return path.join(this.persistentCachePath, `${pageId}.json`);
+    }
+
+    private loadCachedContent(pageId: string): CachedPageContent | null {
+        try {
+            const cacheFilePath = this.getCacheFilePath(pageId);
+            if (fs.existsSync(cacheFilePath)) {
+                const cached = JSON.parse(fs.readFileSync(cacheFilePath, 'utf8'));
+                return cached;
+            }
+        } catch (error) {
+            console.error(`Failed to load cached content for ${pageId}:`, error);
+        }
+        return null;
+    }
+
+    private saveCachedContent(pageId: string, content: string, lastEdited: Date, properties?: { [key: string]: any }): void {
+        try {
+            const cacheFilePath = this.getCacheFilePath(pageId);
+            const cached: CachedPageContent = {
+                content,
+                lastEdited: lastEdited.toISOString(),
+                cachedAt: new Date().toISOString(),
+                properties
+            };
+            fs.writeFileSync(cacheFilePath, JSON.stringify(cached, null, 2), 'utf8');
+            console.log(`Cached content for ${pageId} (${content.length} chars, ${Object.keys(properties || {}).length} properties)`);
+        } catch (error) {
+            console.error(`Failed to save cached content for ${pageId}:`, error);
+        }
+    }
+
+    private isCacheValid(cached: CachedPageContent, currentLastEdited: Date): boolean {
+        const cachedLastEdited = new Date(cached.lastEdited);
+        return cachedLastEdited >= currentLastEdited;
+    }
+
+    async cacheAllPageContent(pages: NotionPage[], progressCallback?: (loaded: number, total: number) => void): Promise<void> {
+        console.log(`Starting background caching of ${pages.length} pages...`);
+        
+        let loaded = 0;
+        const batchSize = 5; // Load 5 pages at a time to avoid overwhelming the API
+        
+        for (let i = 0; i < pages.length; i += batchSize) {
+            const batch = pages.slice(i, i + batchSize);
+            
+            // Process batch in parallel
+            await Promise.all(
+                batch.map(async (page) => {
+                    if (!this.contentCache.has(page.id)) {
+                        try {
+                            const content = await this.getPageContentForSearch(page.id, page.lastEdited, page.properties);
+                            page.content = content; // Also update the page object
+                            loaded++;
+                            console.log(`Cached content for "${page.title}" (${loaded}/${pages.length})`);
+                        } catch (error) {
+                            console.error(`Failed to cache content for "${page.title}":`, error);
+                            this.contentCache.set(page.id, ''); // Cache empty content to avoid retrying
+                            page.content = '';
+                            loaded++;
+                        }
+                        
+                        // Report progress
+                        if (progressCallback) {
+                            progressCallback(loaded, pages.length);
+                        }
+                    } else {
+                        loaded++;
+                    }
+                })
+            );
+            
+            // Small delay between batches to be nice to the API
+            await new Promise(resolve => setTimeout(resolve, 100));
+        }
+        
+        console.log(`Background caching completed: ${loaded}/${pages.length} pages cached`);
+    }
+
+    loadCachedContentForPages(pages: NotionPage[]): void {
+        console.log(`Loading cached content for ${pages.length} pages...`);
+        let cacheHits = 0;
+        
+        pages.forEach(page => {
+            const cachedContent = this.loadCachedContent(page.id);
+            if (cachedContent && this.isCacheValid(cachedContent, page.lastEdited)) {
+                page.content = cachedContent.content;
+                // Also load cached properties if they exist
+                if (cachedContent.properties) {
+                    page.properties = { ...page.properties, ...cachedContent.properties };
+                }
+                this.contentCache.set(page.id, cachedContent.content);
+                cacheHits++;
+            }
+        });
+        
+        console.log(`Loaded ${cacheHits}/${pages.length} pages from persistent cache`);
+        
+        // Debug: Check properties in first cached page
+        if (pages.length > 0) {
+            const firstPage = pages[0];
+            console.log(`CACHE DEBUG: First page "${firstPage.title}" properties:`, firstPage.properties);
+            console.log(`CACHE DEBUG: Properties keys:`, Object.keys(firstPage.properties || {}));
+            if (firstPage.properties?.Type) {
+                console.log(`CACHE DEBUG: Type property value:`, firstPage.properties.Type);
+            }
+        }
+        
+        if (cacheHits > 0) {
+            vscode.window.showInformationMessage(
+                `✓ Loaded ${cacheHits} pages from cache. Search ready!`,
+                { modal: false }
+            );
+        }
     }
 
     async searchPages(query: string = ''): Promise<NotionPage[]> {
+        console.log('=== SEARCHING PAGES IN NOTION API ===');
         const notion = this.getClient();
         
         try {
@@ -69,7 +250,9 @@ export class NotionService {
                     database_id: databaseId,
                     // Remove filter to get all pages - filtering will be done locally
                     start_cursor: nextCursor,
-                    page_size: 100 // Maximum per request
+                    page_size: 100, // Maximum per request
+                    // Explicitly request all properties
+                    filter_properties: undefined // This ensures all properties are returned
                 });
                 
                 allPages = allPages.concat(response.results);
@@ -81,9 +264,65 @@ export class NotionService {
             
             console.log(`Finished loading all pages: ${allPages.length} total`);
             
-            return allPages.map(page => this.convertToNotionPage(page as any));
+            // Debug: Check properties in first few pages
+            if (allPages.length > 0) {
+                console.log(`PROPERTIES DEBUG: First page properties keys:`, Object.keys(allPages[0].properties || {}));
+                console.log(`PROPERTIES DEBUG: First page "Type" property:`, allPages[0].properties?.Type);
+                console.log(`PROPERTIES DEBUG: All properties of first page:`, allPages[0].properties);
+            }
+            
+            const convertedPages = allPages.map(page => this.convertToNotionPage(page as any));
+            
+            // Debug converted pages
+            if (convertedPages.length > 0) {
+                console.log(`CONVERTED DEBUG: First converted page properties:`, convertedPages[0].properties);
+            }
+            
+            return convertedPages;
         } catch (error) {
             throw new Error(`Failed to query Research Tree database: ${error}`);
+        }
+    }
+
+    async getPageContentForSearch(pageId: string, pageLastEdited?: Date, pageProperties?: { [key: string]: any }): Promise<string> {
+        // Check memory cache first
+        if (this.contentCache.has(pageId)) {
+            const cached = this.contentCache.get(pageId)!;
+            console.log(`Retrieved memory cached content for ${pageId}: ${cached.length} characters`);
+            return cached;
+        }
+
+        // Check persistent cache
+        if (pageLastEdited) {
+            const cachedContent = this.loadCachedContent(pageId);
+            if (cachedContent && this.isCacheValid(cachedContent, pageLastEdited)) {
+                console.log(`Retrieved persistent cached content for ${pageId}: ${cachedContent.content.length} characters`);
+                // Also store in memory cache for this session
+                this.contentCache.set(pageId, cachedContent.content);
+                return cachedContent.content;
+            }
+        }
+
+        try {
+            console.log(`Loading fresh content for page ${pageId}`);
+            const { content } = await this.getPageContent(pageId);
+            console.log(`Loaded content for ${pageId}: ${content ? content.length : 0} characters`);
+            
+            // Ensure content is a string
+            const contentString = content || '';
+            
+            // Cache the content in memory
+            this.contentCache.set(pageId, contentString);
+            
+            // Save to persistent cache if we have the last edited date
+            if (pageLastEdited) {
+                this.saveCachedContent(pageId, contentString, pageLastEdited, pageProperties);
+            }
+            
+            return contentString;
+        } catch (error) {
+            console.error(`Failed to load content for page ${pageId}:`, error);
+            return ''; // Return empty string on error
         }
     }
 
@@ -105,6 +344,31 @@ export class NotionService {
             return { title, content };
         } catch (error) {
             throw new Error(`Failed to get page content: ${error}`);
+        }
+    }
+
+    async getPageContentForWebview(pageId: string): Promise<{ title: string; content: string; blocks: any[] }> {
+        const notion = this.getClient();
+        
+        try {
+            const page = await notion.pages.retrieve({ page_id: pageId });
+            const title = this.extractPageTitle(page);
+            
+            // Get raw blocks for webview rendering
+            const blocksResponse = await notion.blocks.children.list({ block_id: pageId });
+            const blocks = blocksResponse.results;
+            
+            // Also get markdown content for toggle functionality
+            if (!this.n2m) {
+                this.n2m = new NotionToMarkdown({ notionClient: notion });
+            }
+            
+            const mdBlocks = await this.n2m.pageToMarkdown(pageId);
+            const content = this.n2m.toMarkdownString(mdBlocks).parent;
+            
+            return { title, content, blocks };
+        } catch (error) {
+            throw new Error(`Failed to get page content for webview: ${error}`);
         }
     }
 
@@ -160,12 +424,16 @@ export class NotionService {
     }
 
     private convertToNotionPage(page: any): NotionPage {
+        const properties = this.extractPageProperties(page);
+        console.log(`Page "${this.extractPageTitle(page)}" properties:`, properties);
+        
         return {
             id: page.id,
             title: this.extractPageTitle(page),
             lastEdited: new Date(page.last_edited_time),
             parent: this.getParentId(page),
-            url: page.url
+            url: page.url,
+            properties: properties
         };
     }
 
@@ -456,5 +724,119 @@ export class NotionService {
             .replace(/[<>:"/\\|?*]/g, '_')
             .replace(/\s+/g, '_')
             .substring(0, 50);
+    }
+
+    private extractPageProperties(page: any): { [key: string]: any } {
+        const properties: { [key: string]: any } = {};
+        
+        console.log(`Extracting properties for page. Raw properties:`, page.properties);
+        
+        if (!page.properties) {
+            console.log('No properties object found in page');
+            return properties;
+        }
+        
+        // List all available property names for debugging
+        const propertyNames = Object.keys(page.properties);
+        console.log(`Available property names: [${propertyNames.join(', ')}]`);
+        
+        // Check specifically for "Type" property
+        if (page.properties.Type) {
+            console.log('Found "Type" property:', page.properties.Type);
+        }
+
+        for (const [key, value] of Object.entries(page.properties)) {
+            const propertyValue = value as any;
+            
+            // Skip the title property as it's handled separately
+            if (propertyValue.type === 'title') {
+                continue;
+            }
+
+            try {
+                switch (propertyValue.type) {
+                    case 'multi_select':
+                        properties[key] = propertyValue.multi_select?.map((item: any) => item.name) || [];
+                        break;
+                    case 'select':
+                        properties[key] = propertyValue.select?.name || null;
+                        break;
+                    case 'rich_text':
+                        properties[key] = propertyValue.rich_text?.map((item: any) => item.plain_text).join('') || '';
+                        break;
+                    case 'number':
+                        properties[key] = propertyValue.number;
+                        break;
+                    case 'checkbox':
+                        properties[key] = propertyValue.checkbox;
+                        break;
+                    case 'date':
+                        properties[key] = propertyValue.date?.start || null;
+                        break;
+                    case 'people':
+                        properties[key] = propertyValue.people?.map((person: any) => person.name || person.id) || [];
+                        break;
+                    case 'files':
+                        properties[key] = propertyValue.files?.map((file: any) => file.name || file.file?.url) || [];
+                        break;
+                    case 'url':
+                        properties[key] = propertyValue.url;
+                        break;
+                    case 'email':
+                        properties[key] = propertyValue.email;
+                        break;
+                    case 'phone_number':
+                        properties[key] = propertyValue.phone_number;
+                        break;
+                    case 'formula':
+                        // Handle formula results based on their type
+                        if (propertyValue.formula?.string) {
+                            properties[key] = propertyValue.formula.string;
+                        } else if (propertyValue.formula?.number !== undefined) {
+                            properties[key] = propertyValue.formula.number;
+                        } else if (propertyValue.formula?.boolean !== undefined) {
+                            properties[key] = propertyValue.formula.boolean;
+                        } else if (propertyValue.formula?.date) {
+                            properties[key] = propertyValue.formula.date.start;
+                        }
+                        break;
+                    case 'relation':
+                        properties[key] = propertyValue.relation?.map((rel: any) => rel.id) || [];
+                        break;
+                    case 'rollup':
+                        // Handle rollup based on the rollup type
+                        if (propertyValue.rollup?.array) {
+                            properties[key] = propertyValue.rollup.array;
+                        } else if (propertyValue.rollup?.number !== undefined) {
+                            properties[key] = propertyValue.rollup.number;
+                        } else if (propertyValue.rollup?.date) {
+                            properties[key] = propertyValue.rollup.date.start;
+                        }
+                        break;
+                    case 'created_time':
+                        properties[key] = propertyValue.created_time;
+                        break;
+                    case 'created_by':
+                        properties[key] = propertyValue.created_by?.name || propertyValue.created_by?.id;
+                        break;
+                    case 'last_edited_time':
+                        properties[key] = propertyValue.last_edited_time;
+                        break;
+                    case 'last_edited_by':
+                        properties[key] = propertyValue.last_edited_by?.name || propertyValue.last_edited_by?.id;
+                        break;
+                    default:
+                        // For unknown types, try to extract any meaningful value
+                        properties[key] = propertyValue;
+                        break;
+                }
+            } catch (error) {
+                console.error(`Failed to extract property ${key}:`, error);
+                properties[key] = null;
+            }
+        }
+
+        console.log(`Extracted properties result:`, properties);
+        return properties;
     }
 }

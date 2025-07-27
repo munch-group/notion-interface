@@ -68,6 +68,18 @@
         "title": "Upload Changes to Notion",
         "category": "Notion",
         "icon": "$(cloud-upload)"
+      },
+      {
+        "command": "notion.toggleViewMode",
+        "title": "Toggle between Rendered and Markdown View",
+        "category": "Notion",
+        "icon": "$(preview)"
+      },
+      {
+        "command": "notion.clearCache",
+        "title": "Clear Notion Cache",
+        "category": "Notion",
+        "icon": "$(trash)"
       }
     ],
     "menus": {
@@ -80,17 +92,22 @@
         {
           "command": "notion.toggleFlatView",
           "when": "view == notion.pageExplorer && notion.viewMode == tree",
-          "group": "navigation@2"
+          "group": "navigation@1"
         },
         {
           "command": "notion.toggleTreeView",
           "when": "view == notion.pageExplorer && notion.viewMode == flat",
-          "group": "navigation@3"
+          "group": "navigation@1"
         },
         {
           "command": "notion.refreshPages",
           "when": "view == notion.pageExplorer",
-          "group": "navigation@4"
+          "group": "navigation@2"
+        },
+        {
+          "command": "notion.clearCache",
+          "when": "view == notion.pageExplorer",
+          "group": "navigation@3"
         }
       ],
       "view/item/context": [
@@ -104,6 +121,11 @@
         {
           "command": "notion.uploadChanges",
           "when": "resourceExtname == .md && notion.isNotionFile",
+          "group": "navigation"
+        },
+        {
+          "command": "notion.toggleViewMode",
+          "when": "activeWebviewPanelId == 'notion.pageView'",
           "group": "navigation"
         }
       ]
@@ -196,6 +218,7 @@
   },
   "dependencies": {
     "@notionhq/client": "^2.2.15",
+    "fuse.js": "^7.1.0",
     "notion-to-md": "^3.1.9"
   }
 }

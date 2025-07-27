@@ -4,8 +4,10 @@ exports.deactivate = exports.activate = void 0;
 const vscode = require("vscode");
 const notionService_1 = require("./notionService");
 const notionTreeProvider_1 = require("./notionTreeProvider");
+const notionWebviewProvider_1 = require("./notionWebviewProvider");
 let notionService;
 let treeProvider;
+let webviewProvider;
 let globalContext;
 function activate(context) {
     globalContext = context;
@@ -13,6 +15,7 @@ function activate(context) {
     // Initialize services
     notionService = new notionService_1.NotionService();
     treeProvider = new notionTreeProvider_1.NotionTreeProvider(notionService);
+    webviewProvider = new notionWebviewProvider_1.NotionWebviewProvider(context, notionService);
     // Register tree view provider
     console.log('Registering tree view provider for notion.pageExplorer');
     const treeView = vscode.window.createTreeView('notion.pageExplorer', {
@@ -38,6 +41,7 @@ function activate(context) {
         // Page navigation and refresh
         vscode.commands.registerCommand('notion.refreshPages', () => {
             console.log('refreshPages command called');
+            vscode.window.showInformationMessage('Debug: Refresh command called - check console');
             treeProvider.refresh();
         }),
         // View mode toggles
@@ -54,6 +58,28 @@ function activate(context) {
         // Page operations
         vscode.commands.registerCommand('notion.openPage', openPage),
         vscode.commands.registerCommand('notion.uploadChanges', uploadChanges),
+        vscode.commands.registerCommand('notion.toggleViewMode', async () => {
+            await webviewProvider.toggleActiveView();
+        }),
+        // Cache management
+        vscode.commands.registerCommand('notion.clearCache', async () => {
+            const deletedCount = notionService.clearCache();
+            vscode.window.showInformationMessage(`Cleared ${deletedCount} cache files. Data will be refreshed on next load.`);
+            // Also refresh pages to reload fresh data
+            await treeProvider.refresh();
+        }),
+        // Debug command to check properties
+        vscode.commands.registerCommand('notion.debugProperties', async () => {
+            console.log('=== DEBUG PROPERTIES COMMAND ===');
+            const firstPage = treeProvider.getPageById('test') || treeProvider.pages?.[0];
+            if (firstPage) {
+                vscode.window.showInformationMessage(`First page: "${firstPage.title}", Properties: ${JSON.stringify(firstPage.properties)}`);
+                console.log('First page full data:', firstPage);
+            }
+            else {
+                vscode.window.showInformationMessage('No pages found to debug');
+            }
+        }),
         // File watching for Notion files
         vscode.workspace.onDidSaveTextDocument(onDocumentSaved),
         vscode.workspace.onDidOpenTextDocument(onDocumentOpened),
@@ -103,24 +129,13 @@ async function setNotionApiKey() {
     }
 }
 async function searchPages() {
-    // Check current view mode
-    const config = vscode.workspace.getConfiguration('notion');
-    const currentViewMode = config.get('viewMode', 'flat');
-    if (currentViewMode === 'tree') {
-        const switchToFlat = await vscode.window.showWarningMessage('Search is only available in flat view due to tree complexity. Switch to flat view?', 'Switch to Flat View', 'Cancel');
-        if (switchToFlat === 'Switch to Flat View') {
-            treeProvider.setViewMode('flat');
-        }
-        else {
-            return; // User cancelled
-        }
-    }
     const query = await vscode.window.showInputBox({
-        prompt: 'Search Notion pages',
+        prompt: 'Search Notion pages (title and content)',
         placeHolder: 'Enter search terms... (leave empty to show all)',
         ignoreFocusOut: true
     });
     if (query !== undefined) {
+        console.log(`Search function called with query: "${query}"`);
         await treeProvider.searchPages(query);
         if (query.trim()) {
             vscode.window.showInformationMessage(`Search results for: "${query}"`);
@@ -151,22 +166,8 @@ async function openPage(pageIdOrItem) {
             console.error('Invalid page ID provided:', pageIdOrItem);
             throw new Error('Invalid page ID provided');
         }
-        await vscode.window.withProgress({
-            location: vscode.ProgressLocation.Notification,
-            title: "Loading Notion page...",
-            cancellable: false
-        }, async (progress) => {
-            // Get page content from Notion
-            const { title, content } = await notionService.getPageContent(pageId);
-            // Save to local .notion folder
-            const filePath = notionService.savePageLocally(pageId, title, content);
-            // Open the file in VS Code
-            const doc = await vscode.workspace.openTextDocument(filePath);
-            await vscode.window.showTextDocument(doc);
-            // Set context to indicate this is a Notion file
-            vscode.commands.executeCommand('setContext', 'notion.isNotionFile', true);
-            vscode.window.showInformationMessage(`Opened "${title}" from Notion`);
-        });
+        // Open page in webview instead of markdown file
+        await webviewProvider.openPage(pageId);
     }
     catch (error) {
         vscode.window.showErrorMessage(`Failed to open page: ${error}`);
@@ -267,6 +268,7 @@ function onDocumentOpened(document) {
     }
 }
 function deactivate() {
+    webviewProvider?.dispose();
     vscode.commands.executeCommand('setContext', 'notion.enabled', false);
     vscode.commands.executeCommand('setContext', 'notion.isNotionFile', false);
 }
