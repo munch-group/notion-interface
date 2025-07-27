@@ -202,6 +202,20 @@ async function openPage(pageIdOrItem: string | any) {
             // Save to local .notion folder as .qmd file
             const filePath = notionService.savePageLocally(pageId, title, safeContent);
             
+            // Check if the file is already open in any editor
+            const fileUri = vscode.Uri.file(filePath);
+            const existingEditor = vscode.window.visibleTextEditors.find(editor => 
+                editor.document.uri.fsPath === fileUri.fsPath
+            );
+            
+            if (existingEditor) {
+                // File is already open, just focus on it
+                console.log('File already open, focusing on existing editor');
+                await vscode.window.showTextDocument(existingEditor.document, existingEditor.viewColumn);
+                vscode.window.showInformationMessage(`Focused on already open "${title}"`);
+                return;
+            }
+            
             // Open the .qmd file with Quarto's visual editor
             const document = await vscode.workspace.openTextDocument(filePath);
             
