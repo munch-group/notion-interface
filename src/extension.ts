@@ -2,11 +2,8 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import { NotionService } from './notionService';
 import { NotionTreeProvider } from './notionTreeProvider';
-import { NotionWebviewProvider } from './notionWebviewProvider';
-
 let notionService: NotionService;
 let treeProvider: NotionTreeProvider;
-let webviewProvider: NotionWebviewProvider;
 let globalContext: vscode.ExtensionContext;
 
 export function activate(context: vscode.ExtensionContext) {
@@ -16,7 +13,6 @@ export function activate(context: vscode.ExtensionContext) {
     // Initialize services
     notionService = new NotionService();
     treeProvider = new NotionTreeProvider(notionService);
-    webviewProvider = new NotionWebviewProvider(context, notionService);
     
     // Register tree view provider
     console.log('Registering tree view provider for notion.pageExplorer');
@@ -69,9 +65,7 @@ export function activate(context: vscode.ExtensionContext) {
         // Page operations
         vscode.commands.registerCommand('notion.openPage', openPage),
         vscode.commands.registerCommand('notion.uploadChanges', uploadChanges),
-        vscode.commands.registerCommand('notion.toggleViewMode', async () => {
-            await webviewProvider.toggleActiveView();
-        }),
+        vscode.commands.registerCommand('notion.uploadAllChanges', uploadAllChanges),
 
         // Cache management
         vscode.commands.registerCommand('notion.clearCache', async () => {
@@ -186,8 +180,44 @@ async function openPage(pageIdOrItem: string | any) {
             throw new Error('Invalid page ID provided');
         }
 
-        // Open page in webview instead of markdown file
-        await webviewProvider.openPage(pageId);
+        await vscode.window.withProgress({
+            location: vscode.ProgressLocation.Notification,
+            title: "Loading Notion page...",
+            cancellable: false
+        }, async (progress) => {
+            // Get page content as markdown
+            console.log('=== OPENING PAGE ===', pageId);
+            const result = await notionService.getPageContent(pageId);
+            console.log('=== getPageContent result ===', result);
+            
+            const { title, content } = result;
+            console.log('Extracted title:', title, 'content length:', content?.length);
+            
+            if (!title) {
+                throw new Error('Failed to extract page title');
+            }
+            
+            const safeContent = content || '';
+            
+            // Save to local .notion folder as .qmd file
+            const filePath = notionService.savePageLocally(pageId, title, safeContent);
+            
+            // Open the .qmd file with Quarto's visual editor
+            const document = await vscode.workspace.openTextDocument(filePath);
+            
+            // First open the document in the regular editor
+            await vscode.window.showTextDocument(document);
+            
+            // Then switch to Quarto visual mode
+            try {
+                await vscode.commands.executeCommand('quarto.editInVisualMode');
+            } catch (quartoError) {
+                console.log('Quarto visual editor not available:', quartoError);
+                vscode.window.showWarningMessage('Quarto extension not available. Install the Quarto extension to use visual editing mode.');
+            }
+            
+            vscode.window.showInformationMessage(`Opened "${title}" from Notion in visual editor`);
+        });
     } catch (error) {
         vscode.window.showErrorMessage(`Failed to open page: ${error}`);
     }
@@ -200,36 +230,13 @@ async function uploadChanges() {
         return;
     }
 
-    const filePath = editor.document.fileName;
-    const pageId = notionService.getPageIdFromFile(filePath);
+    const content = editor.document.getText();
+    const parsed = notionService.parseQuartoFile(content);
     
-    if (!pageId) {
+    if (!parsed.pageId) {
         vscode.window.showWarningMessage('This file is not linked to a Notion page');
         return;
     }
-
-    const content = editor.document.getText();
-    
-    // Extract content without the header comment and title
-    const lines = content.split('\n');
-    let contentStart = 0;
-    
-    // Skip the comment line
-    if (lines[0]?.startsWith('<!-- Notion Page ID:')) {
-        contentStart = 1;
-    }
-    
-    // Skip the title line if it exists
-    if (lines[contentStart]?.startsWith('# ')) {
-        contentStart++;
-    }
-    
-    // Skip empty lines
-    while (contentStart < lines.length && !lines[contentStart].trim()) {
-        contentStart++;
-    }
-    
-    const markdownContent = lines.slice(contentStart).join('\n');
 
     try {
         await vscode.window.withProgress({
@@ -237,7 +244,7 @@ async function uploadChanges() {
             title: "Uploading changes to Notion...",
             cancellable: false
         }, async (progress) => {
-            await notionService.updatePageContent(pageId, markdownContent);
+            await notionService.updatePageContent(parsed.pageId!, parsed.content);
             vscode.window.showInformationMessage('Changes uploaded to Notion successfully!');
         });
     } catch (error) {
@@ -245,13 +252,84 @@ async function uploadChanges() {
     }
 }
 
+async function uploadAllChanges() {
+    try {
+        await vscode.window.withProgress({
+            location: vscode.ProgressLocation.Notification,
+            title: "Uploading all Notion files...",
+            cancellable: false
+        }, async (progress) => {
+            // Get all .qmd files in the .notion folder
+            const notionFiles = await vscode.workspace.findFiles('**/.notion/**/*.qmd');
+            
+            if (notionFiles.length === 0) {
+                vscode.window.showInformationMessage('No Notion files found to upload');
+                return;
+            }
+
+            let uploadedCount = 0;
+            let errorCount = 0;
+            const errors: string[] = [];
+
+            for (let i = 0; i < notionFiles.length; i++) {
+                const fileUri = notionFiles[i];
+                const fileName = fileUri.fsPath;
+                
+                progress.report({ 
+                    message: `Uploading file ${i + 1} of ${notionFiles.length}...`,
+                    increment: (100 / notionFiles.length)
+                });
+
+                try {
+                    // Read file content
+                    const document = await vscode.workspace.openTextDocument(fileUri);
+                    const content = document.getText();
+                    
+                    // Parse Quarto file
+                    const parsed = notionService.parseQuartoFile(content);
+                    
+                    if (!parsed.pageId) {
+                        console.warn(`Skipping file ${fileName} - no page ID found`);
+                        continue;
+                    }
+
+                    // Upload to Notion
+                    await notionService.updatePageContent(parsed.pageId, parsed.content);
+                    uploadedCount++;
+                    
+                } catch (error) {
+                    errorCount++;
+                    const shortFileName = fileName.split('/').pop() || fileName;
+                    errors.push(`${shortFileName}: ${error}`);
+                    console.error(`Failed to upload ${fileName}:`, error);
+                }
+            }
+
+            // Show results
+            if (uploadedCount > 0 && errorCount === 0) {
+                vscode.window.showInformationMessage(`Successfully uploaded ${uploadedCount} file(s) to Notion!`);
+            } else if (uploadedCount > 0 && errorCount > 0) {
+                vscode.window.showWarningMessage(`Uploaded ${uploadedCount} file(s), but ${errorCount} failed. Check output for details.`);
+                errors.forEach(error => console.error('Upload error:', error));
+            } else {
+                vscode.window.showErrorMessage(`Failed to upload all files. ${errorCount} errors occurred.`);
+                errors.forEach(error => console.error('Upload error:', error));
+            }
+        });
+    } catch (error) {
+        vscode.window.showErrorMessage(`Failed to upload files: ${error}`);
+    }
+}
+
 async function onDocumentSaved(document: vscode.TextDocument) {
-    if (!document.fileName.includes('.notion')) {
+    if (!document.fileName.includes('.notion') || !document.fileName.endsWith('.qmd')) {
         return;
     }
 
-    const pageId = notionService.getPageIdFromFile(document.fileName);
-    if (!pageId) {
+    const content = document.getText();
+    const parsed = notionService.parseQuartoFile(content);
+    
+    if (!parsed.pageId) {
         return;
     }
 
@@ -260,34 +338,12 @@ async function onDocumentSaved(document: vscode.TextDocument) {
     
     if (autoSync) {
         try {
-            // Extract content and upload directly
-            const content = document.getText();
-            const lines = content.split('\n');
-            let contentStart = 0;
-            
-            // Skip the comment line
-            if (lines[0]?.startsWith('<!-- Notion Page ID:')) {
-                contentStart = 1;
-            }
-            
-            // Skip the title line if it exists
-            if (lines[contentStart]?.startsWith('# ')) {
-                contentStart++;
-            }
-            
-            // Skip empty lines
-            while (contentStart < lines.length && !lines[contentStart].trim()) {
-                contentStart++;
-            }
-            
-            const markdownContent = lines.slice(contentStart).join('\n');
-
             await vscode.window.withProgress({
                 location: vscode.ProgressLocation.Notification,
                 title: "Auto-syncing to Notion...",
                 cancellable: false
             }, async (progress) => {
-                await notionService.updatePageContent(pageId, markdownContent);
+                await notionService.updatePageContent(parsed.pageId!, parsed.content);
                 vscode.window.showInformationMessage('✓ Auto-synced to Notion', { modal: false });
             });
         } catch (error) {
@@ -297,7 +353,7 @@ async function onDocumentSaved(document: vscode.TextDocument) {
 }
 
 function onDocumentOpened(document: vscode.TextDocument) {
-    if (document.fileName.includes('.notion')) {
+    if (document.fileName.includes('.notion') && document.fileName.endsWith('.qmd')) {
         const pageId = notionService.getPageIdFromFile(document.fileName);
         if (pageId) {
             vscode.commands.executeCommand('setContext', 'notion.isNotionFile', true);
@@ -306,7 +362,6 @@ function onDocumentOpened(document: vscode.TextDocument) {
 }
 
 export function deactivate() {
-    webviewProvider?.dispose();
     vscode.commands.executeCommand('setContext', 'notion.enabled', false);
     vscode.commands.executeCommand('setContext', 'notion.isNotionFile', false);
 }

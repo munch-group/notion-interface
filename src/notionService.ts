@@ -404,10 +404,15 @@ export class NotionService {
     }
 
     savePageLocally(pageId: string, title: string, content: string): string {
-        const fileName = `${this.sanitizeFileName(title)}_${pageId.slice(0, 8)}.md`;
+        const fileName = `${this.sanitizeFileName(title)}_${pageId.slice(0, 8)}.qmd`;
         const filePath = path.join(this.notionFolderPath, fileName);
         
-        const fileContent = `<!-- Notion Page ID: ${pageId} -->\n# ${title}\n\n${content}`;
+        const fileContent = `<!-- Notion Page ID: ${pageId} -->
+---
+title: "${title}"
+---
+
+${content}`;
         fs.writeFileSync(filePath, fileContent, 'utf8');
         
         return filePath;
@@ -421,6 +426,50 @@ export class NotionService {
         } catch {
             return null;
         }
+    }
+
+    parseQuartoFile(content: string): { title: string | null, content: string, pageId: string | null } {
+        // Extract page ID from comment
+        const pageIdMatch = content.match(/<!-- Notion Page ID: ([a-f0-9-]+) -->/);
+        const pageId = pageIdMatch ? pageIdMatch[1] : null;
+
+        // Extract title and content from YAML frontmatter
+        const yamlMatch = content.match(/^<!-- Notion Page ID: [a-f0-9-]+ -->\s*\n---\s*\ntitle:\s*"([^"]+)"\s*\n---\s*\n([\s\S]*)/);
+        
+        if (yamlMatch) {
+            return {
+                title: yamlMatch[1],
+                content: yamlMatch[2].trim(),
+                pageId
+            };
+        }
+
+        // Fallback: try to extract from old format (# Title)
+        const lines = content.split('\n');
+        let contentStart = 0;
+        let title = null;
+
+        // Skip the comment line
+        if (lines[0]?.startsWith('<!-- Notion Page ID:')) {
+            contentStart = 1;
+        }
+
+        // Extract title from # header if present
+        if (lines[contentStart]?.startsWith('# ')) {
+            title = lines[contentStart].substring(2).trim();
+            contentStart++;
+        }
+
+        // Skip empty lines
+        while (contentStart < lines.length && !lines[contentStart].trim()) {
+            contentStart++;
+        }
+
+        return {
+            title,
+            content: lines.slice(contentStart).join('\n'),
+            pageId
+        };
     }
 
     private convertToNotionPage(page: any): NotionPage {

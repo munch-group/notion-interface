@@ -13,8 +13,8 @@ In this mode, automatically perform any actions that only affect project content
 
 Still require confirmation for:
 - External dependencies (npm install/uninstall)
-- VS Code extension manifest changes (package.json contributes section)
-- Breaking changes to public APIs
+<!-- - VS Code extension manifest changes (package.json contributes section)
+- Breaking changes to public APIs -->
 - Actions that affect files outside the project directory
 - Play completion sound at end of multi-step tasks: "afplay /System/Library/Sounds/Glass.aiff"
 

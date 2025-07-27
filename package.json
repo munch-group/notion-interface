@@ -70,10 +70,10 @@
         "icon": "$(cloud-upload)"
       },
       {
-        "command": "notion.toggleViewMode",
-        "title": "Toggle between Rendered and Markdown View",
+        "command": "notion.uploadAllChanges",
+        "title": "Upload All Changes to Notion",
         "category": "Notion",
-        "icon": "$(preview)"
+        "icon": "$(cloud-upload)"
       },
       {
         "command": "notion.clearCache",
@@ -120,13 +120,13 @@
       "editor/title": [
         {
           "command": "notion.uploadChanges",
-          "when": "resourceExtname == .md && notion.isNotionFile",
-          "group": "navigation"
+          "when": "resourceExtname == .qmd && notion.isNotionFile",
+          "group": "navigation@1"
         },
         {
-          "command": "notion.toggleViewMode",
-          "when": "activeWebviewPanelId == 'notion.pageView'",
-          "group": "navigation"
+          "command": "notion.uploadAllChanges",
+          "when": "notion.hasApiKey",
+          "group": "navigation@2"
         }
       ]
     },
