@@ -1,0 +1,50 @@
+[project]
+name = "notion-interface"
+description = "Interface with Notion using API key - browse pages, edit in markdown, sync changes"
+version = "0.1.0"
+authors = ["your-username <your-email@example.com>"]
+license = "MIT"
+readme = "README.md"
+homepage = "https://github.com/your-username/notion-interface"
+repository = "https://github.com/your-username/notion-interface"
+channels = ["conda-forge"]
+platforms = ["osx-arm64", "osx-64", "linux-64", "win-64"]
+
+[dependencies]
+nodejs = ">=18.0.0"
+
+[tasks]
+# Install dependencies
+install = "npm install"
+
+# Development tasks
+dev-install = { cmd = "npm install && npm run compile", description = "Install dependencies and compile TypeScript" }
+compile = { cmd = "npm run compile", description = "Compile TypeScript to JavaScript" }
+watch = { cmd = "npm run watch", description = "Watch and recompile TypeScript on changes" }
+
+# Build and package
+build = { cmd = "npm run compile", description = "Build the extension" }
+package = { cmd = "npm run package", description = "Create .vsix package file" }
+prepublish = { cmd = "npm run vscode:prepublish", description = "Prepare extension for publishing" }
+
+# Quality and testing
+lint = { cmd = "npm run lint", description = "Run ESLint on TypeScript source files" }
+lint-fix = { cmd = "npm run lint -- --fix", description = "Run ESLint and auto-fix issues" }
+pretest = { cmd = "npm run pretest", description = "Compile and lint before testing" }
+test = { cmd = "npm run test", description = "Run extension tests" }
+
+# Development workflow
+dev-test = { cmd = "npm run package && code --install-extension notion-interface-0.1.0.vsix --force", description = "Package and install extension for testing in VS Code" }
+clean = { cmd = "rm -rf out/ *.vsix node_modules/.cache", description = "Clean build artifacts and cache" }
+
+# Combined workflows
+full-build = { depends-on = ["install", "lint", "compile", "package"], description = "Complete build pipeline: install deps, lint, compile, and package" }
+dev-setup = { depends-on = ["install", "compile"], description = "Set up development environment" }
+
+[feature.dev.dependencies]
+# Development-specific dependencies could go here if needed
+
+[environments]
+# Default environment includes all dependencies
+default = { features = [], solve-group = "default" }
+dev = { features = ["dev"], solve-group = "default" }

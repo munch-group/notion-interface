@@ -16,5 +16,6 @@ Still require confirmation for:
 - VS Code extension manifest changes (package.json contributes section)
 - Breaking changes to public APIs
 - Actions that affect files outside the project directory
+- Play completion sound at end of multi-step tasks: "afplay /System/Library/Sounds/Glass.aiff"
 
 Continue with the previous task or await new instructions in this autonomous mode.

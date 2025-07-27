@@ -1,0 +1,22 @@
+# Compiled output
+out/
+*.vsix
+
+# Dependencies
+node_modules/
+
+# Development cache
+.vscode-test/
+.notion-vscode/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+
+# Environment
+.env
+.env.local
