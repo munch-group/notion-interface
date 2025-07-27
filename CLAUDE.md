@@ -117,22 +117,40 @@ The extension provides these user-configurable settings:
 
 ## File System Organization
 
-### Local Storage
-- **`.notion/` folder**: Created in workspace root (or home directory if no workspace)
-- **File naming**: `PageTitle_ID.md` format
+The extension uses two distinct storage systems for different purposes:
+
+### Working Files (`.notion/` folder)
+- **Location**: Created in workspace root only (requires open workspace)
+- **Purpose**: Stores actual **editable files** that you work with in VS Code
+- **File naming**: `PageTitle_ID.qmd` format (Quarto markdown files)
 - **File format**: 
   ```markdown
   <!-- Notion Page ID: [page-id] -->
-  # Page Title
+  ---
+  title: "Page Title"
+  ---
   
   [Page content in markdown]
   ```
+- **Usage**: These are the files you open, edit, and sync back to Notion
+- **Workflow**: 
+  1. Click "Open Page" → Creates `.qmd` file in `.notion/` folder
+  2. Edit the file in VS Code (with Quarto visual editor if available)
+  3. Save file → Auto-syncs changes back to Notion (if enabled)
 
-### Caching System
-- **Location**: `~/.notion-vscode/cache/`
+### Performance Cache (`~/.notion-vscode/cache/`)
+- **Location**: `~/.notion-vscode/cache/` in home directory
+- **Purpose**: JSON cache for fast search, browsing, and offline viewing
 - **Format**: JSON files named `{pageId}.json`
-- **Contents**: Page content, properties, and metadata with timestamps
-- **Purpose**: Enables instant search and offline viewing
+- **Contents**: Page metadata, content, properties, and timestamps
+- **Usage**: Background caching to avoid blocking UI during search operations
+- **Note**: This is performance-only storage - you don't directly interact with these files
+
+### Key Differences
+- **`.notion/` folder**: Your actual working files that you edit and save
+- **`.notion-vscode/cache/`**: Background performance cache for search/browsing
+- **Without `.notion/` folder**: Cannot open and edit pages in VS Code
+- **Without cache folder**: Search and browsing will be slower but still functional
 
 ## Development Patterns & Conventions
 

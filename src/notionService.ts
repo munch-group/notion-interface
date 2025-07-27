@@ -31,9 +31,10 @@ export class NotionService {
 
     constructor() {
         const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+        // Only create .notion folder in workspace, not in home directory
         this.notionFolderPath = workspaceFolder 
             ? path.join(workspaceFolder.uri.fsPath, '.notion')
-            : path.join(process.env.HOME || process.env.USERPROFILE || '', '.notion');
+            : '';
         
         // Set up persistent cache path
         this.persistentCachePath = path.join(os.homedir(), '.notion-vscode', 'cache');
@@ -43,7 +44,7 @@ export class NotionService {
     }
 
     private ensureNotionFolder(): void {
-        if (!fs.existsSync(this.notionFolderPath)) {
+        if (this.notionFolderPath && !fs.existsSync(this.notionFolderPath)) {
             fs.mkdirSync(this.notionFolderPath, { recursive: true });
         }
     }
@@ -404,6 +405,10 @@ export class NotionService {
     }
 
     savePageLocally(pageId: string, title: string, content: string): string {
+        if (!this.notionFolderPath) {
+            throw new Error('No workspace folder open. Please open a folder/workspace to save Notion pages locally.');
+        }
+        
         const fileName = `${this.sanitizeFileName(title)}_${pageId.slice(0, 8)}.qmd`;
         const filePath = path.join(this.notionFolderPath, fileName);
         
