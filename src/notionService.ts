@@ -735,11 +735,9 @@ ${content}`;
     }
 
     private parseMarkdownToRichText(text: string): any[] {
-        // Simple markdown parser for basic formatting
         const richTextArray: any[] = [];
-        let currentIndex = 0;
         
-        // Regular expressions for different formatting
+        // Regular expressions for different formatting (in order of precedence)
         const patterns = [
             { regex: /\*\*(.*?)\*\*/g, annotation: 'bold' },
             { regex: /\*(.*?)\*/g, annotation: 'italic' },
@@ -748,7 +746,7 @@ ${content}`;
             { regex: /`(.*?)`/g, annotation: 'code' }
         ];
         
-        // For simplicity, if no formatting is detected, return plain text
+        // Check if there's any formatting
         let hasFormatting = false;
         for (const pattern of patterns) {
             if (pattern.regex.test(text)) {
@@ -761,16 +759,79 @@ ${content}`;
             return [{ type: 'text', text: { content: text } }];
         }
         
-        // For now, return simplified rich text (full parsing is complex)
-        // This handles the most common case
-        let processedText = text
-            .replace(/\*\*(.*?)\*\*/g, '$1') // Remove bold markers
-            .replace(/\*(.*?)\*/g, '$1')     // Remove italic markers  
-            .replace(/<u>(.*?)<\/u>/g, '$1') // Remove underline markers
-            .replace(/~~(.*?)~~/g, '$1')     // Remove strikethrough markers
-            .replace(/`(.*?)`/g, '$1');      // Remove code markers
+        // Parse text with formatting
+        let remainingText = text;
+        let currentPos = 0;
         
-        return [{ type: 'text', text: { content: processedText } }];
+        // Find all matches and their positions
+        const matches: Array<{start: number, end: number, content: string, annotation: string}> = [];
+        
+        for (const pattern of patterns) {
+            const regex = new RegExp(pattern.regex.source, 'g');
+            let match;
+            while ((match = regex.exec(text)) !== null) {
+                matches.push({
+                    start: match.index,
+                    end: match.index + match[0].length,
+                    content: match[1], // The captured content without markers
+                    annotation: pattern.annotation
+                });
+            }
+        }
+        
+        // Sort matches by start position
+        matches.sort((a, b) => a.start - b.start);
+        
+        // If no matches found after parsing, return plain text
+        if (matches.length === 0) {
+            return [{ type: 'text', text: { content: text } }];
+        }
+        
+        // Build rich text array
+        let lastEnd = 0;
+        
+        for (const match of matches) {
+            // Add plain text before this match
+            if (match.start > lastEnd) {
+                const plainText = text.substring(lastEnd, match.start);
+                if (plainText) {
+                    richTextArray.push({
+                        type: 'text',
+                        text: { content: plainText }
+                    });
+                }
+            }
+            
+            // Add formatted text
+            const annotations: any = {};
+            annotations[match.annotation] = true;
+            
+            richTextArray.push({
+                type: 'text',
+                text: { content: match.content },
+                annotations: annotations
+            });
+            
+            lastEnd = match.end;
+        }
+        
+        // Add any remaining plain text
+        if (lastEnd < text.length) {
+            const remainingText = text.substring(lastEnd);
+            if (remainingText) {
+                richTextArray.push({
+                    type: 'text',
+                    text: { content: remainingText }
+                });
+            }
+        }
+        
+        // If we couldn't parse properly, fall back to plain text
+        if (richTextArray.length === 0) {
+            return [{ type: 'text', text: { content: text } }];
+        }
+        
+        return richTextArray;
     }
 
     private sanitizeFileName(filename: string): string {

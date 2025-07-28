@@ -463,6 +463,14 @@ export class NotionTreeProvider implements vscode.TreeDataProvider<NotionPageIte
         return new NotionPageItem(parentPage, hasChildren, this.searchQuery);
     }
 
+    getAllPages(): NotionPage[] {
+        return this.pages;
+    }
+
+    getPageTree(): Map<string, NotionPage[]> {
+        return this.pageTree;
+    }
+
 
 }
 

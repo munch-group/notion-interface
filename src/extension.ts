@@ -64,8 +64,7 @@ export function activate(context: vscode.ExtensionContext) {
 
         // Page operations
         vscode.commands.registerCommand('notion.openPage', openPage),
-        vscode.commands.registerCommand('notion.uploadChanges', uploadChanges),
-        vscode.commands.registerCommand('notion.uploadAllChanges', uploadAllChanges),
+        vscode.commands.registerCommand('notion.generateAllFiles', generateAllFiles),
 
         // Cache management
         vscode.commands.registerCommand('notion.clearCache', async () => {
@@ -86,6 +85,9 @@ export function activate(context: vscode.ExtensionContext) {
                 vscode.window.showInformationMessage('No pages found to debug');
             }
         }),
+
+        // Tree dump command
+        vscode.commands.registerCommand('notion.dumpTree', dumpTreeAsMarkdown),
 
 
         // File watching for Notion files
@@ -237,101 +239,76 @@ async function openPage(pageIdOrItem: string | any) {
     }
 }
 
-async function uploadChanges() {
-    const editor = vscode.window.activeTextEditor;
-    if (!editor) {
-        vscode.window.showWarningMessage('No active editor found');
-        return;
-    }
-
-    const content = editor.document.getText();
-    const parsed = notionService.parseQuartoFile(content);
-    
-    if (!parsed.pageId) {
-        vscode.window.showWarningMessage('This file is not linked to a Notion page');
-        return;
-    }
-
+async function generateAllFiles() {
     try {
         await vscode.window.withProgress({
             location: vscode.ProgressLocation.Notification,
-            title: "Uploading changes to Notion...",
+            title: "Generating files for all Notion pages...",
             cancellable: false
         }, async (progress) => {
-            await notionService.updatePageContent(parsed.pageId!, parsed.content);
-            vscode.window.showInformationMessage('Changes uploaded to Notion successfully!');
-        });
-    } catch (error) {
-        vscode.window.showErrorMessage(`Failed to upload changes: ${error}`);
-    }
-}
+            // Get all pages from Notion
+            console.log('=== GENERATING ALL FILES ===');
+            const pages = await notionService.searchPages();
+            console.log(`Found ${pages.length} pages to generate files for`);
 
-async function uploadAllChanges() {
-    try {
-        await vscode.window.withProgress({
-            location: vscode.ProgressLocation.Notification,
-            title: "Uploading all Notion files...",
-            cancellable: false
-        }, async (progress) => {
-            // Get all .qmd files in the .notion folder
-            const notionFiles = await vscode.workspace.findFiles('**/.notion/**/*.qmd');
-            
-            if (notionFiles.length === 0) {
-                vscode.window.showInformationMessage('No Notion files found to upload');
+            if (pages.length === 0) {
+                vscode.window.showInformationMessage('No Notion pages found to generate files for');
                 return;
             }
 
-            let uploadedCount = 0;
+            let successCount = 0;
             let errorCount = 0;
             const errors: string[] = [];
 
-            for (let i = 0; i < notionFiles.length; i++) {
-                const fileUri = notionFiles[i];
-                const fileName = fileUri.fsPath;
+            for (let i = 0; i < pages.length; i++) {
+                const page = pages[i];
                 
                 progress.report({ 
-                    message: `Uploading file ${i + 1} of ${notionFiles.length}...`,
-                    increment: (100 / notionFiles.length)
+                    message: `Processing ${page.title} (${i + 1} of ${pages.length})...`,
+                    increment: (100 / pages.length)
                 });
 
                 try {
-                    // Read file content
-                    const document = await vscode.workspace.openTextDocument(fileUri);
-                    const content = document.getText();
+                    console.log(`Generating file for page: ${page.title} (${page.id})`);
                     
-                    // Parse Quarto file
-                    const parsed = notionService.parseQuartoFile(content);
+                    // Get page content from Notion
+                    const result = await notionService.getPageContent(page.id);
+                    const { title, content } = result;
                     
-                    if (!parsed.pageId) {
-                        console.warn(`Skipping file ${fileName} - no page ID found`);
+                    if (!title) {
+                        console.warn(`Skipping page ${page.id} - no title found`);
                         continue;
                     }
-
-                    // Upload to Notion
-                    await notionService.updatePageContent(parsed.pageId, parsed.content);
-                    uploadedCount++;
+                    
+                    const safeContent = content || '';
+                    
+                    // Save to local .notion folder as .qmd file
+                    const filePath = notionService.savePageLocally(page.id, title, safeContent);
+                    console.log(`Generated file: ${filePath}`);
+                    
+                    successCount++;
                     
                 } catch (error) {
                     errorCount++;
-                    const shortFileName = fileName.split('/').pop() || fileName;
-                    errors.push(`${shortFileName}: ${error}`);
-                    console.error(`Failed to upload ${fileName}:`, error);
+                    const shortTitle = page.title.length > 30 ? page.title.substring(0, 30) + '...' : page.title;
+                    errors.push(`${shortTitle}: ${error}`);
+                    console.error(`Failed to generate file for ${page.title}:`, error);
                 }
             }
 
             // Show results
-            if (uploadedCount > 0 && errorCount === 0) {
-                vscode.window.showInformationMessage(`Successfully uploaded ${uploadedCount} file(s) to Notion!`);
-            } else if (uploadedCount > 0 && errorCount > 0) {
-                vscode.window.showWarningMessage(`Uploaded ${uploadedCount} file(s), but ${errorCount} failed. Check output for details.`);
-                errors.forEach(error => console.error('Upload error:', error));
+            if (successCount > 0 && errorCount === 0) {
+                vscode.window.showInformationMessage(`Successfully generated ${successCount} file(s) in .notion/ folder!`);
+            } else if (successCount > 0 && errorCount > 0) {
+                vscode.window.showWarningMessage(`Generated ${successCount} file(s), but ${errorCount} failed. Check output for details.`);
+                errors.forEach(error => console.error('Generation error:', error));
             } else {
-                vscode.window.showErrorMessage(`Failed to upload all files. ${errorCount} errors occurred.`);
-                errors.forEach(error => console.error('Upload error:', error));
+                vscode.window.showErrorMessage(`Failed to generate all files. ${errorCount} errors occurred.`);
+                errors.forEach(error => console.error('Generation error:', error));
             }
         });
     } catch (error) {
-        vscode.window.showErrorMessage(`Failed to upload files: ${error}`);
+        vscode.window.showErrorMessage(`Failed to generate files: ${error}`);
     }
 }
 
@@ -372,6 +349,106 @@ function onDocumentOpened(document: vscode.TextDocument) {
         if (pageId) {
             vscode.commands.executeCommand('setContext', 'notion.isNotionFile', true);
         }
+    }
+}
+
+async function dumpTreeAsMarkdown() {
+    try {
+        const editor = vscode.window.activeTextEditor;
+        if (!editor) {
+            vscode.window.showErrorMessage('Please open a file and place cursor where you want to insert the tree.');
+            return;
+        }
+
+        await vscode.window.withProgress({
+            location: vscode.ProgressLocation.Notification,
+            title: "Generating tree markdown...",
+            cancellable: false
+        }, async (progress) => {
+            // Get all pages and tree structure from the tree provider
+            const pages = treeProvider.getAllPages();
+            const pageTree = treeProvider.getPageTree();
+            
+            if (pages.length === 0) {
+                vscode.window.showErrorMessage('No Notion pages loaded. Please refresh first.');
+                return;
+            }
+
+            console.log(`Dumping tree with ${pages.length} total pages`);
+            console.log('Page tree structure:', Array.from(pageTree.entries()).map(([parent, children]) => 
+                `${parent}: ${children.length} children`
+            ));
+
+            const databaseId = '208fd1e7c2e180ee9aacc44071c02889';
+            
+            // Find root pages (pages with no parent or parent is database)
+            const rootPages = pages.filter(page => {
+                const isRootByParent = !page.parent || page.parent === databaseId || 
+                                       !pages.find(p => p.id === page.parent);
+                // Also include any page that has children (should be shown as expandable)
+                const hasChildren = pageTree.has(page.id);
+                return isRootByParent || hasChildren;
+            });
+
+            console.log(`Found ${rootPages.length} root pages:`, rootPages.map(p => p.title));
+
+            // Generate markdown recursively
+            function generateMarkdownTree(pageList: any[], depth: number = 0, visited: Set<string> = new Set()): string {
+                let markdown = '';
+                const indent = '  '.repeat(depth);
+                
+                // Sort pages alphabetically
+                pageList.sort((a, b) => a.title.localeCompare(b.title));
+                
+                for (const page of pageList) {
+                    // Prevent infinite loops
+                    if (visited.has(page.id)) {
+                        console.log(`Skipping already visited page: ${page.title}`);
+                        continue;
+                    }
+                    visited.add(page.id);
+                    
+                    // Add the page as a markdown list item
+                    markdown += `${indent}- ${page.title}\n`;
+                    
+                    // Add children if they exist
+                    const children = pageTree.get(page.id) || [];
+                    if (children.length > 0) {
+                        console.log(`Adding ${children.length} children for ${page.title}`);
+                        markdown += generateMarkdownTree(children, depth + 1, new Set(visited));
+                    }
+                }
+                
+                return markdown;
+            }
+
+            // If we have no root pages but have all pages, just show all pages flat
+            let markdownTree: string;
+            if (rootPages.length === 0) {
+                console.log('No root pages found, showing all pages flat');
+                markdownTree = pages
+                    .sort((a, b) => a.title.localeCompare(b.title))
+                    .map(page => `- ${page.title}`)
+                    .join('\n') + '\n';
+            } else {
+                markdownTree = generateMarkdownTree(rootPages);
+            }
+
+            if (!markdownTree.trim()) {
+                vscode.window.showWarningMessage('No tree structure found to dump.');
+                return;
+            }
+
+            // Insert at current cursor position
+            const position = editor.selection.active;
+            await editor.edit(editBuilder => {
+                editBuilder.insert(position, markdownTree);
+            });
+
+            vscode.window.showInformationMessage(`Inserted tree with ${pages.length} pages at cursor position.`);
+        });
+    } catch (error) {
+        vscode.window.showErrorMessage(`Failed to dump tree: ${error}`);
     }
 }
 

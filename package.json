@@ -64,22 +64,22 @@
         "category": "Notion"
       },
       {
-        "command": "notion.uploadChanges",
-        "title": "Upload Changes to Notion",
+        "command": "notion.generateAllFiles",
+        "title": "Generate All Pages as Files",
         "category": "Notion",
-        "icon": "$(cloud-upload)"
-      },
-      {
-        "command": "notion.uploadAllChanges",
-        "title": "Upload All Changes to Notion",
-        "category": "Notion",
-        "icon": "$(cloud-upload)"
+        "icon": "$(file-directory-create)"
       },
       {
         "command": "notion.clearCache",
         "title": "Clear Notion Cache",
         "category": "Notion",
         "icon": "$(trash)"
+      },
+      {
+        "command": "notion.dumpTree",
+        "title": "Dump Tree as Markdown List",
+        "category": "Notion",
+        "icon": "$(list-unordered)"
       }
     ],
     "menus": {
@@ -105,9 +105,19 @@
           "group": "navigation@2"
         },
         {
-          "command": "notion.clearCache",
+          "command": "notion.generateAllFiles",
           "when": "view == notion.pageExplorer",
           "group": "navigation@3"
+        },
+        {
+          "command": "notion.clearCache",
+          "when": "view == notion.pageExplorer",
+          "group": "navigation@4"
+        },
+        {
+          "command": "notion.dumpTree",
+          "when": "view == notion.pageExplorer",
+          "group": "navigation@5"
         }
       ],
       "view/item/context": [
@@ -117,18 +127,7 @@
           "group": "inline"
         }
       ],
-      "editor/title": [
-        {
-          "command": "notion.uploadChanges",
-          "when": "resourceExtname == .qmd && notion.isNotionFile",
-          "group": "navigation@1"
-        },
-        {
-          "command": "notion.uploadAllChanges",
-          "when": "notion.hasApiKey",
-          "group": "navigation@2"
-        }
-      ]
+      "editor/title": []
     },
     "views": {
       "notion": [
