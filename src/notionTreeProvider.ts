@@ -374,21 +374,42 @@ export class NotionTreeProvider implements vscode.TreeDataProvider<NotionPageIte
         // For database pages, treat pages whose parent is the database as root-level
         const databaseId = '208fd1e7c2e180ee9aacc44071c02889';
         
+        console.log('🔍 Analyzing root pages for sidebar...');
         const rootPages = this.filteredPages.filter(page => {
             // Root pages are those whose parent is the database itself, or have no parent,
             // OR whose parent is not in our filtered pages (external parent)
-            const isRootByParent = !page.parent || page.parent === databaseId || 
-                                   !this.filteredPages.find(p => p.id === page.parent);
+            const hasNoParent = !page.parent;
+            const parentIsDatabase = page.parent === databaseId;
+            const parentNotInFiltered = page.parent && !this.filteredPages.find(p => p.id === page.parent);
             
-            // ALSO include any page that has children (should be shown as expandable)
-            const hasChildren = this.pageTree.has(page.id);
+            const isRootByParent = hasNoParent || parentIsDatabase || parentNotInFiltered;
             
-            return isRootByParent || hasChildren;
+            if (isRootByParent) {
+                let reason = '';
+                if (hasNoParent) reason = 'no parent';
+                else if (parentIsDatabase) reason = 'parent is database';
+                else if (parentNotInFiltered) reason = 'parent not in filtered pages';
+                
+                console.log(`  📌 "${page.title}" is root: ${reason} (parent: ${page.parent})`);
+                return true;
+            }
+            
+            return false;
         });
 
-        console.log(`Tree view: Found ${rootPages.length} root pages out of ${this.filteredPages.length} total pages`);
-        console.log('Root page IDs:', rootPages.map(p => p.id));
-        console.log('Pages with children (should be in root):', Array.from(this.pageTree.keys()));
+        console.log('=== ROOT PAGE DETECTION ===');
+        console.log(`Found ${rootPages.length} root pages out of ${this.filteredPages.length} total pages:`);
+        rootPages.forEach(page => {
+            console.log(`  ✓ ROOT: "${page.title}" (hasChildren: ${this.pageTree.has(page.id)})`);
+        });
+        
+        console.log('Non-root pages:');
+        this.filteredPages.filter(page => !rootPages.includes(page)).forEach(page => {
+            const hasChildren = this.pageTree.has(page.id);
+            const isRootByParent = !page.parent || page.parent === databaseId || 
+                                   !this.filteredPages.find(p => p.id === page.parent);
+            console.log(`  • NON-ROOT: "${page.title}" (isRootByParent: ${isRootByParent}, hasChildren: ${hasChildren})`);
+        });
         
         return rootPages
             .sort((a, b) => a.title.localeCompare(b.title))
@@ -408,41 +429,115 @@ export class NotionTreeProvider implements vscode.TreeDataProvider<NotionPageIte
     }
 
     private buildPageTree(): void {
+        console.log('🏗️ Building page tree using bottom-up algorithm...');
         this.pageTree.clear();
         
-        console.log('Building page tree from', this.filteredPages.length, 'pages');
+        if (this.filteredPages.length === 0) {
+            console.log('No filtered pages to build tree from');
+            return;
+        }
         
-        // First pass: collect all page IDs to detect cycles
-        const allPageIds = new Set(this.filteredPages.map(p => p.id));
+        // Step 1: Create maps of all pages and their relationships
+        const allPages = new Map<string, NotionPage>();
+        const childrenMap = new Map<string, Set<string>>(); // parent_id -> Set(child_ids)
         
-        // Group pages by their parent, but avoid cycles
+        // Populate all pages map
         for (const page of this.filteredPages) {
-            console.log(`Page "${page.title}" has parent:`, page.parent);
-            if (page.parent && allPageIds.has(page.parent)) {
-                // Check for direct cycle (page being its own parent)
-                if (page.parent === page.id) {
-                    console.warn(`Cycle detected: Page "${page.title}" is its own parent, skipping`);
-                    continue;
+            allPages.set(page.id, page);
+        }
+        
+        console.log(`📊 Total pages: ${allPages.size}`);
+        
+        // Step 2: Build children map from Parent Goal relations
+        for (const page of this.filteredPages) {
+            if (page.parent && allPages.has(page.parent)) {
+                if (!childrenMap.has(page.parent)) {
+                    childrenMap.set(page.parent, new Set());
                 }
-                
-                // Check for simple 2-node cycle (A->B->A)
-                const parentPage = this.filteredPages.find(p => p.id === page.parent);
-                if (parentPage && parentPage.parent === page.id) {
-                    console.warn(`Cycle detected: "${page.title}" and "${parentPage.title}" are mutual parents, skipping child relationship`);
-                    continue;
-                }
-                
-                if (!this.pageTree.has(page.parent)) {
-                    this.pageTree.set(page.parent, []);
-                }
-                this.pageTree.get(page.parent)!.push(page);
-                console.log(`Added "${page.title}" as child of ${page.parent}`);
+                childrenMap.get(page.parent)!.add(page.id);
             }
         }
         
-        console.log('Page tree built:', Array.from(this.pageTree.entries()).map(([parent, children]) => 
-            `${parent}: ${children.length} children`
-        ));
+        console.log(`📊 Parents with children: ${childrenMap.size}`);
+        
+        // Step 3: Identify leaf pages (pages with no children)
+        const leafPages = new Set<string>();
+        for (const [pageId] of allPages) {
+            if (!childrenMap.has(pageId)) {
+                leafPages.add(pageId);
+            }
+        }
+        
+        console.log(`🍃 Leaf pages: ${leafPages.size}`);
+        
+        // Step 4: Build tree structure bottom-up
+        const processedPages = new Set<string>();
+        const treeStructure = new Map<string, NotionPage[]>();
+        let totalNodesAdded = 0;
+        
+        // Process each leaf page and walk up to roots
+        for (const leafId of leafPages) {
+            let currentId = leafId;
+            const visitedInThisPath = new Set<string>();
+            
+            // Walk up the parent chain from leaf to root
+            while (currentId && allPages.has(currentId) && !processedPages.has(currentId)) {
+                // Cycle detection
+                if (visitedInThisPath.has(currentId)) {
+                    console.warn(`⚠️ Cycle detected in path from leaf "${allPages.get(leafId)?.title}", breaking at "${allPages.get(currentId)?.title}"`);
+                    break;
+                }
+                visitedInThisPath.add(currentId);
+                
+                const currentPage = allPages.get(currentId)!;
+                const parentId = currentPage.parent;
+                
+                // Add current page to its parent's children (if parent exists and page not already processed)
+                if (parentId && allPages.has(parentId) && !processedPages.has(currentId)) {
+                    if (!treeStructure.has(parentId)) {
+                        treeStructure.set(parentId, []);
+                    }
+                    // Only add if not already there
+                    if (!treeStructure.get(parentId)!.some(child => child.id === currentId)) {
+                        treeStructure.get(parentId)!.push(currentPage);
+                        totalNodesAdded++;
+                        console.log(`  ➕ Added "${currentPage.title}" to parent "${allPages.get(parentId)?.title}" (total: ${totalNodesAdded})`);
+                    } else {
+                        console.log(`  ⏭️ Skipped "${currentPage.title}" - already child of "${allPages.get(parentId)?.title}"`);
+                    }
+                }
+                
+                processedPages.add(currentId);
+                currentId = parentId || '';
+            }
+        }
+        
+        // Step 5: Handle any remaining unprocessed pages (potential roots without children)
+        for (const [pageId, page] of allPages) {
+            if (!processedPages.has(pageId)) {
+                console.log(`📌 Unprocessed page (likely root): "${page.title}"`);
+                // These are root pages that weren't reached from any leaf
+                processedPages.add(pageId);
+            }
+        }
+        
+        // Step 6: Transfer to the main pageTree structure
+        this.pageTree = treeStructure;
+        
+        console.log('✅ Tree built successfully');
+        console.log(`📊 Parents with children: ${this.pageTree.size}`);
+        console.log(`📊 Total processed pages: ${processedPages.size}/${allPages.size}`);
+        console.log(`📊 Total nodes added to tree: ${totalNodesAdded}`);
+        
+        if (totalNodesAdded > allPages.size) {
+            console.warn(`⚠️ WARNING: More nodes in tree (${totalNodesAdded}) than total pages (${allPages.size}) - duplicates detected!`);
+        }
+        
+        // Debug: Show tree structure summary
+        for (const [parentId, children] of this.pageTree.entries()) {
+            const parentPage = allPages.get(parentId);
+            console.log(`  "${parentPage?.title}" → ${children.length} children`);
+        }
     }
 
     getPageById(pageId: string): NotionPage | undefined {

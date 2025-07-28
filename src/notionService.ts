@@ -28,6 +28,7 @@ export class NotionService {
     private notionFolderPath: string;
     private contentCache: Map<string, string> = new Map();
     private persistentCachePath: string;
+    private debugCounter: number = 0;
 
     constructor() {
         const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
@@ -83,6 +84,7 @@ export class NotionService {
         this.notion = null;
         this.n2m = null;
         this.contentCache.clear();
+        this.debugCounter = 0; // Reset debug counter
     }
 
     public clearCache(): number {
@@ -234,7 +236,8 @@ export class NotionService {
     }
 
     async searchPages(query: string = ''): Promise<NotionPage[]> {
-        console.log('=== SEARCHING PAGES IN NOTION API ===');
+        console.log('🔄 Loading pages from Notion...');
+        this.debugCounter = 0; // Reset debug counter for each search
         const notion = this.getClient();
         
         try {
@@ -260,24 +263,101 @@ export class NotionService {
                 hasMore = response.has_more;
                 nextCursor = response.next_cursor || undefined;
                 
-                console.log(`Loaded ${response.results.length} pages, total so far: ${allPages.length}, has more: ${hasMore}`);
-            }
+                }
             
-            console.log(`Finished loading all pages: ${allPages.length} total`);
-            
-            // Debug: Check properties in first few pages
-            if (allPages.length > 0) {
-                console.log(`PROPERTIES DEBUG: First page properties keys:`, Object.keys(allPages[0].properties || {}));
-                console.log(`PROPERTIES DEBUG: First page "Type" property:`, allPages[0].properties?.Type);
-                console.log(`PROPERTIES DEBUG: All properties of first page:`, allPages[0].properties);
-            }
+            console.log(`✅ Loaded ${allPages.length} pages total from Notion database`);
             
             const convertedPages = allPages.map(page => this.convertToNotionPage(page as any));
             
-            // Debug converted pages
-            if (convertedPages.length > 0) {
-                console.log(`CONVERTED DEBUG: First converted page properties:`, convertedPages[0].properties);
+            // Check for duplicate page IDs - CRITICAL for data integrity
+            const pageIds = convertedPages.map(p => p.id);
+            const uniqueIds = new Set(pageIds);
+            
+            if (pageIds.length !== uniqueIds.size) {
+                console.error('🚨 DUPLICATE PAGE IDs DETECTED during page loading!');
+                
+                // Find and report duplicates
+                const duplicates: Map<string, string[]> = new Map();
+                convertedPages.forEach(page => {
+                    const existing = duplicates.get(page.id) || [];
+                    existing.push(page.title);
+                    duplicates.set(page.id, existing);
+                });
+                
+                // Show only the actual duplicates
+                const actualDuplicates = Array.from(duplicates.entries()).filter(([id, titles]) => titles.length > 1);
+                
+                console.error('Duplicate page IDs found:');
+                actualDuplicates.forEach(([id, titles]) => {
+                    console.error(`   ID: ${id} appears ${titles.length} times:`);
+                    titles.forEach(title => console.error(`      - "${title}"`));
+                });
+                
+                // Show error message to user and prevent loading
+                const duplicateList = actualDuplicates.map(([id, titles]) => 
+                    `• ID: ${id.substring(0, 8)}... (${titles.join(', ')})`
+                ).join('\n');
+                
+                const errorMessage = `🚨 DUPLICATE PAGE IDs DETECTED!\n\n` +
+                    `Found ${actualDuplicates.length} page(s) with duplicate IDs in your Notion database:\n\n` +
+                    duplicateList + '\n\n' +
+                    `This must be fixed in Notion before the database can be loaded properly.\n` +
+                    `Each page must have a unique ID.`;
+                
+                // Show blocking error dialog
+                await vscode.window.showErrorMessage(
+                    `Duplicate Page IDs Found! Found ${actualDuplicates.length} duplicates that must be fixed in Notion before loading.`,
+                    { modal: true },
+                    'Show Details'
+                ).then(async (selection) => {
+                    if (selection === 'Show Details') {
+                        // Show detailed error in output channel
+                        const outputChannel = vscode.window.createOutputChannel('Notion Duplicate IDs');
+                        outputChannel.clear();
+                        outputChannel.appendLine(errorMessage);
+                        outputChannel.show();
+                    }
+                });
+                
+                // Throw error to prevent loading corrupted data
+                throw new Error(`Database contains ${actualDuplicates.length} duplicate page IDs. Fix in Notion first.`);
             }
+            
+            console.log(`✅ All ${convertedPages.length} page IDs are unique - proceeding with load`);
+            
+            // Debug: Show parent type distribution
+            const parentTypes = {
+                page_id: 0,
+                database_id: 0,
+                workspace: 0,
+                none: 0,
+                other: 0
+            };
+            
+            convertedPages.forEach(page => {
+                if (page.parent) {
+                    // Find original page to check parent type
+                    const originalPage = allPages.find(p => p.id === page.id);
+                    if (originalPage?.parent?.type === 'page_id') {
+                        parentTypes.page_id++;
+                    } else if (originalPage?.parent?.type === 'database_id') {
+                        parentTypes.database_id++;
+                    } else if (originalPage?.parent?.type === 'workspace') {
+                        parentTypes.workspace++;
+                    } else {
+                        parentTypes.other++;
+                    }
+                } else {
+                    parentTypes.none++;
+                }
+            });
+            
+            console.log('=== PARENT TYPE DISTRIBUTION ===');
+            console.log(`Pages with page parents (nested): ${parentTypes.page_id}`);
+            console.log(`Pages with database parents (top-level): ${parentTypes.database_id}`);
+            console.log(`Pages with workspace parents: ${parentTypes.workspace}`);
+            console.log(`Pages with no parent: ${parentTypes.none}`);
+            console.log(`Pages with other parent types: ${parentTypes.other}`);
             
             return convertedPages;
         } catch (error) {
@@ -479,7 +559,6 @@ ${content}`;
 
     private convertToNotionPage(page: any): NotionPage {
         const properties = this.extractPageProperties(page);
-        console.log(`Page "${this.extractPageTitle(page)}" properties:`, properties);
         
         return {
             id: page.id,
@@ -514,27 +593,31 @@ ${content}`;
     }
 
     private getParentId(page: any): string | undefined {
-        // Always check properties first for relation-based hierarchy
-        if (page.properties) {
-            // Look for common parent/relation properties
-            for (const [key, value] of Object.entries(page.properties)) {
-                if ((key.toLowerCase().includes('parent') || key.toLowerCase().includes('relation') || 
-                     key.toLowerCase().includes('sub') || key.toLowerCase().includes('child')) && 
-                    value && typeof value === 'object' && 'relation' in value) {
-                    const relation = (value as any).relation;
-                    if (relation && relation.length > 0 && relation[0].id) {
-                        return relation[0].id;
-                    }
-                }
-            }
+        const pageTitle = page.properties?.title?.title?.[0]?.plain_text || 'Unknown';
+        
+        // Show raw parent data for first 3 pages only
+        if (this.debugCounter < 3) {
+            console.log(`🔍 PARENT DEBUG [${pageTitle}]:`, JSON.stringify(page.parent, null, 2));
+            this.debugCounter++;
         }
         
-        // Fallback to standard parent structure
+        // PRIORITY 1: Use Notion's built-in parent structure (guaranteed no cycles)
         if (page.parent?.type === 'page_id') {
+            console.log(`✅ ${pageTitle}: Using built-in parent ${page.parent.page_id}`);
             return page.parent.page_id;
         }
         
-        // Don't return database as parent since that makes all pages children of database
+        // PRIORITY 2: For database pages, use "Parent Goal" relation as fallback
+        if (page.properties && page.properties['Parent Goal']) {
+            const parentGoal = page.properties['Parent Goal'];
+            if (parentGoal.type === 'relation' && parentGoal.relation && parentGoal.relation.length > 0) {
+                const parentId = parentGoal.relation[0].id;
+                console.log(`📎 ${pageTitle}: Using Parent Goal relation ${parentId}`);
+                return parentId;
+            }
+        }
+        
+        // No parent found
         return undefined;
     }
 

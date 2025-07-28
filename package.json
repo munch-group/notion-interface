@@ -80,6 +80,30 @@
         "title": "Dump Tree as Markdown List",
         "category": "Notion",
         "icon": "$(list-unordered)"
+      },
+      {
+        "command": "notion.dumpTreeWithProperties",
+        "title": "Dump Tree with Properties",
+        "category": "Notion",
+        "icon": "$(list-selection)"
+      },
+      {
+        "command": "notion.findCircularReferences",
+        "title": "Find Circular References",
+        "category": "Notion",
+        "icon": "$(warning)"
+      },
+      {
+        "command": "notion.exportTreeToJson",
+        "title": "Export Tree to JSON",
+        "category": "Notion",
+        "icon": "$(save)"
+      },
+      {
+        "command": "notion.parseTreeJson",
+        "title": "Parse Tree JSON",
+        "category": "Notion",
+        "icon": "$(search)"
       }
     ],
     "menus": {
@@ -118,6 +142,26 @@
           "command": "notion.dumpTree",
           "when": "view == notion.pageExplorer",
           "group": "navigation@5"
+        },
+        {
+          "command": "notion.dumpTreeWithProperties",
+          "when": "view == notion.pageExplorer",
+          "group": "navigation@6"
+        },
+        {
+          "command": "notion.findCircularReferences",
+          "when": "view == notion.pageExplorer",
+          "group": "navigation@7"
+        },
+        {
+          "command": "notion.exportTreeToJson",
+          "when": "view == notion.pageExplorer",
+          "group": "navigation@8"
+        },
+        {
+          "command": "notion.parseTreeJson",
+          "when": "view == notion.pageExplorer",
+          "group": "navigation@9"
         }
       ],
       "view/item/context": [
