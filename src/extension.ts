@@ -103,6 +103,40 @@ export function activate(context: vscode.ExtensionContext) {
         // File watching for Notion files
         vscode.workspace.onDidSaveTextDocument(onDocumentSaved),
         vscode.workspace.onDidOpenTextDocument(onDocumentOpened),
+        
+        // Notebook save handling
+        vscode.workspace.onDidSaveNotebookDocument(async (notebook) => {
+            if (!notebook.uri.fsPath.includes('.notion') || !notebook.uri.fsPath.endsWith('.ipynb')) {
+                return;
+            }
+            
+            const pageId = notionService.getPageIdFromFile(notebook.uri.fsPath);
+            if (!pageId) {
+                return;
+            }
+            
+            const config = vscode.workspace.getConfiguration('notion');
+            const autoSync = config.get<boolean>('autoSync', true);
+            
+            if (autoSync) {
+                try {
+                    // Read the notebook file content
+                    const content = await vscode.workspace.fs.readFile(notebook.uri);
+                    const notebookJson = content.toString();
+                    
+                    await vscode.window.withProgress({
+                        location: vscode.ProgressLocation.Notification,
+                        title: "Auto-syncing notebook to Notion...",
+                        cancellable: false
+                    }, async () => {
+                        await notionService.updatePageContent(pageId, notebookJson);
+                        vscode.window.showInformationMessage('✓ Auto-synced notebook to Notion', { modal: false });
+                    });
+                } catch (error) {
+                    vscode.window.showWarningMessage(`Auto-sync failed: ${error}. Use manual upload if needed.`);
+                }
+            }
+        }),
 
         // Tree view
         treeView
@@ -211,7 +245,7 @@ async function openPage(pageIdOrItem: string | any) {
             
             const safeContent = content || '';
             
-            // Save to local .notion folder as .qmd file
+            // Save to local .notion folder as .ipynb file
             const filePath = notionService.savePageLocally(pageId, title, safeContent);
             
             // Check if the file is already open in any editor
@@ -228,21 +262,11 @@ async function openPage(pageIdOrItem: string | any) {
                 return;
             }
             
-            // Open the .qmd file with Quarto's visual editor
-            const document = await vscode.workspace.openTextDocument(filePath);
+            // Open the notebook file using the notebook API
+            const notebookUri = vscode.Uri.file(filePath);
+            await vscode.commands.executeCommand('vscode.openWith', notebookUri, 'jupyter-notebook');
             
-            // First open the document in the regular editor
-            await vscode.window.showTextDocument(document);
-            
-            // Then switch to Quarto visual mode
-            try {
-                await vscode.commands.executeCommand('quarto.editInVisualMode');
-            } catch (quartoError) {
-                console.log('Quarto visual editor not available:', quartoError);
-                vscode.window.showWarningMessage('Quarto extension not available. Install the Quarto extension to use visual editing mode.');
-            }
-            
-            vscode.window.showInformationMessage(`Opened "${title}" from Notion in visual editor`);
+            vscode.window.showInformationMessage(`Opened "${title}" from Notion as notebook`);
         });
     } catch (error) {
         vscode.window.showErrorMessage(`Failed to open page: ${error}`);
@@ -292,7 +316,7 @@ async function generateAllFiles() {
                     
                     const safeContent = content || '';
                     
-                    // Save to local .notion folder as .qmd file
+                    // Save to local .notion folder as .ipynb file
                     const filePath = notionService.savePageLocally(page.id, title, safeContent);
                     console.log(`Generated file: ${filePath}`);
                     
@@ -323,38 +347,20 @@ async function generateAllFiles() {
 }
 
 async function onDocumentSaved(document: vscode.TextDocument) {
-    if (!document.fileName.includes('.notion') || !document.fileName.endsWith('.qmd')) {
+    // For notebooks, we need to listen to notebook save events instead
+    // This handler is for legacy .qmd files only
+    if (!document.fileName.includes('.notion')) {
         return;
     }
-
-    const content = document.getText();
-    const parsed = notionService.parseQuartoFile(content);
     
-    if (!parsed.pageId) {
+    // Skip if it's a notebook (will be handled by notebook save event)
+    if (document.fileName.endsWith('.ipynb')) {
         return;
-    }
-
-    const config = vscode.workspace.getConfiguration('notion');
-    const autoSync = config.get<boolean>('autoSync', true); // Default to true
-    
-    if (autoSync) {
-        try {
-            await vscode.window.withProgress({
-                location: vscode.ProgressLocation.Notification,
-                title: "Auto-syncing to Notion...",
-                cancellable: false
-            }, async (progress) => {
-                await notionService.updatePageContent(parsed.pageId!, parsed.content);
-                vscode.window.showInformationMessage('✓ Auto-synced to Notion', { modal: false });
-            });
-        } catch (error) {
-            vscode.window.showWarningMessage(`Auto-sync failed: ${error}. Use manual upload if needed.`);
-        }
     }
 }
 
 function onDocumentOpened(document: vscode.TextDocument) {
-    if (document.fileName.includes('.notion') && document.fileName.endsWith('.qmd')) {
+    if (document.fileName.includes('.notion') && document.fileName.endsWith('.ipynb')) {
         const pageId = notionService.getPageIdFromFile(document.fileName);
         if (pageId) {
             vscode.commands.executeCommand('setContext', 'notion.isNotionFile', true);

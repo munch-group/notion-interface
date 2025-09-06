@@ -414,13 +414,12 @@ export class NotionService {
             const page = await notion.pages.retrieve({ page_id: pageId });
             const title = this.extractPageTitle(page);
             
-            // Use notion-to-md for better markdown conversion
-            if (!this.n2m) {
-                this.n2m = new NotionToMarkdown({ notionClient: notion });
-            }
+            // Get all blocks for the page
+            const blocksResponse = await notion.blocks.children.list({ block_id: pageId });
+            const blocks = blocksResponse.results;
             
-            const mdBlocks = await this.n2m.pageToMarkdown(pageId);
-            const content = this.n2m.toMarkdownString(mdBlocks).parent;
+            // Convert blocks to markdown with embedded metadata
+            const content = this.convertBlocksToMarkdownWithMetadata(blocks);
             
             return { title, content };
         } catch (error) {
@@ -457,31 +456,119 @@ export class NotionService {
         const notion = this.getClient();
         
         try {
-            // Get current blocks and delete them
-            const blocks = await notion.blocks.children.list({ block_id: pageId });
+            let notebook: any;
             
-            // Delete existing blocks (simplified approach)
-            for (const block of blocks.results) {
-                if ('id' in block) {
-                    try {
-                        await notion.blocks.delete({ block_id: block.id });
-                    } catch (e) {
-                        // Some blocks might not be deletable, continue
+            // Parse the content as notebook JSON
+            try {
+                notebook = JSON.parse(content);
+            } catch {
+                // If not valid JSON, might be legacy format - convert it
+                throw new Error('Invalid notebook format');
+            }
+            
+            // Get current blocks from Notion
+            const blocksResponse = await notion.blocks.children.list({ block_id: pageId });
+            const currentBlocks = blocksResponse.results;
+            
+            // Map preserved blocks by ID
+            const preservedBlocksMap = new Map<string, any>();
+            const blocksToDelete: string[] = [];
+            
+            for (const block of currentBlocks) {
+                if ('id' in block && 'type' in block) {
+                    if (block.type === 'child_database' || 
+                        block.type === 'link_to_page' ||
+                        block.type === 'synced_block' ||
+                        block.type === 'table' ||
+                        block.type === 'column_list' ||
+                        block.type === 'child_page') {
+                        preservedBlocksMap.set(block.id, block);
+                    } else {
+                        blocksToDelete.push(block.id);
                     }
                 }
             }
             
-            // Convert markdown to blocks and add them
-            const newBlocks = this.convertMarkdownToBlocks(content);
+            // Delete all content blocks
+            for (const blockId of blocksToDelete) {
+                try {
+                    await notion.blocks.delete({ block_id: blockId });
+                } catch (e) {
+                    console.error(`Failed to delete block ${blockId}:`, e);
+                }
+            }
+            
+            // Convert notebook cells to Notion blocks
+            const newBlocks: any[] = [];
+            
+            for (const cell of notebook.cells || []) {
+                // Skip title cell
+                if (cell.metadata?.is_title) {
+                    continue;
+                }
+                
+                // Skip preserved blocks (they already exist in Notion)
+                if (cell.metadata?.notion_block_id && preservedBlocksMap.has(cell.metadata.notion_block_id)) {
+                    continue;
+                }
+                
+                // Convert cell to Notion block(s)
+                const blocks = this.convertCellToNotionBlocks(cell);
+                newBlocks.push(...blocks);
+            }
+            
+            // Append all new blocks
             if (newBlocks.length > 0) {
                 await notion.blocks.children.append({
                     block_id: pageId,
                     children: newBlocks
                 });
             }
-        } catch (error) {
-            throw new Error(`Failed to update page: ${error}`);
+            
+        } catch (error: any) {
+            console.error('=== UPDATE PAGE CONTENT ERROR ===');
+            console.error('Full error:', error);
+            throw new Error(`Failed to update page: ${error.message || error}`);
         }
+    }
+    
+    private convertCellToNotionBlocks(cell: any): any[] {
+        const blocks: any[] = [];
+        const content = Array.isArray(cell.source) ? cell.source.join('\n') : cell.source;
+        
+        if (!content || !content.trim()) {
+            return blocks;
+        }
+        
+        // Handle code cells
+        if (cell.cell_type === 'code') {
+            const language = cell.metadata?.language || 'python';
+            blocks.push({
+                object: 'block',
+                type: 'code',
+                code: {
+                    language: language,
+                    rich_text: [{ type: 'text', text: { content: content } }]
+                }
+            });
+            return blocks;
+        }
+        
+        // Handle markdown cells - parse and convert each line/block
+        const lines = content.split('\n');
+        let i = 0;
+        
+        while (i < lines.length) {
+            const block = this.convertLineToBlock(lines[i], lines, i);
+            if (block) {
+                blocks.push(block.block);
+                i = block.newIndex;
+            } else {
+                i++;
+            }
+        }
+        
+        return blocks;
     }
 
     savePageLocally(pageId: string, title: string, content: string): string {
@@ -489,16 +576,13 @@ export class NotionService {
             throw new Error('No workspace folder open. Please open a folder/workspace to save Notion pages locally.');
         }
         
-        const fileName = `${this.sanitizeFileName(title)}_${pageId.slice(0, 8)}.qmd`;
+        const fileName = `${this.sanitizeFileName(title)}_${pageId.slice(0, 8)}.ipynb`;
         const filePath = path.join(this.notionFolderPath, fileName);
         
-        const fileContent = `<!-- Notion Page ID: ${pageId} -->
----
-title: "${title}"
----
-
-${content}`;
-        fs.writeFileSync(filePath, fileContent, 'utf8');
+        // Convert content to notebook format
+        const notebook = this.createNotebookFromContent(pageId, title, content);
+        
+        fs.writeFileSync(filePath, JSON.stringify(notebook, null, 2), 'utf8');
         
         return filePath;
     }
@@ -506,6 +590,14 @@ ${content}`;
     getPageIdFromFile(filePath: string): string | null {
         try {
             const content = fs.readFileSync(filePath, 'utf8');
+            
+            // Handle .ipynb files
+            if (filePath.endsWith('.ipynb')) {
+                const notebook = JSON.parse(content);
+                return notebook.metadata?.notion_page_id || null;
+            }
+            
+            // Legacy .qmd support
             const match = content.match(/<!-- Notion Page ID: ([a-f0-9-]+) -->/);
             return match ? match[1] : null;
         } catch {
@@ -671,12 +763,138 @@ ${content}`;
                 case 'divider':
                     markdown += '---\n\n';
                     break;
+                case 'child_database':
+                    markdown += `[Database: ${block.child_database?.title || 'Untitled Database'}]\n\n`;
+                    break;
+                case 'link_to_page':
+                    markdown += `[Linked Page/Database View]\n\n`;
+                    break;
+                case 'synced_block':
+                    markdown += `[Synced Block]\n\n`;
+                    break;
+                case 'table':
+                    markdown += `[Table]\n\n`;
+                    break;
+                case 'column_list':
+                    markdown += `[Column Layout]\n\n`;
+                    break;
+                // Skip child_page as it's handled separately in the tree view
+                case 'child_page':
+                    break;
+                default:
+                    // For unknown block types, log them but don't crash
+                    console.log(`Unknown block type: ${block.type}`);
+                    break;
             }
         }
         
         return markdown.trim();
     }
 
+    private convertLineToBlock(line: string, lines: string[], index: number): {block: any, newIndex: number} | null {
+        const trimmedLine = line.trim();
+        
+        if (!trimmedLine) {
+            return null;
+        }
+        
+        // Skip database/view placeholders
+        if (trimmedLine.startsWith('[Database:') || 
+            trimmedLine === '[Linked Page/Database View]' ||
+            trimmedLine === '[Synced Block]' ||
+            trimmedLine === '[Table]' ||
+            trimmedLine === '[Column Layout]') {
+            return null;
+        }
+        
+        let block: any = null;
+        let newIndex = index + 1;
+        
+        if (trimmedLine.startsWith('# ')) {
+            block = {
+                object: 'block',
+                type: 'heading_1',
+                heading_1: {
+                    rich_text: this.parseMarkdownToRichText(trimmedLine.substring(2))
+                }
+            };
+        } else if (trimmedLine.startsWith('## ')) {
+            block = {
+                object: 'block',
+                type: 'heading_2',
+                heading_2: {
+                    rich_text: this.parseMarkdownToRichText(trimmedLine.substring(3))
+                }
+            };
+        } else if (trimmedLine.startsWith('### ')) {
+            block = {
+                object: 'block',
+                type: 'heading_3',
+                heading_3: {
+                    rich_text: this.parseMarkdownToRichText(trimmedLine.substring(4))
+                }
+            };
+        } else if (trimmedLine.startsWith('- ') || trimmedLine.startsWith('* ')) {
+            block = {
+                object: 'block',
+                type: 'bulleted_list_item',
+                bulleted_list_item: {
+                    rich_text: this.parseMarkdownToRichText(trimmedLine.substring(2))
+                }
+            };
+        } else if (trimmedLine.match(/^\d+\.\s/)) {
+            block = {
+                object: 'block',
+                type: 'numbered_list_item',
+                numbered_list_item: {
+                    rich_text: this.parseMarkdownToRichText(trimmedLine.replace(/^\d+\.\s/, ''))
+                }
+            };
+        } else if (trimmedLine.startsWith('```')) {
+            // Handle code blocks
+            const language = trimmedLine.substring(3);
+            let i = index + 1;
+            const codeLines = [];
+            while (i < lines.length && !lines[i].startsWith('```')) {
+                codeLines.push(lines[i]);
+                i++;
+            }
+            block = {
+                object: 'block',
+                type: 'code',
+                code: {
+                    language: language || 'plain text',
+                    rich_text: [{ type: 'text', text: { content: codeLines.join('\n') } }]
+                }
+            };
+            newIndex = i + 1; // Skip past the closing ```
+        } else if (trimmedLine.startsWith('> ')) {
+            block = {
+                object: 'block',
+                type: 'quote',
+                quote: {
+                    rich_text: this.parseMarkdownToRichText(trimmedLine.substring(2))
+                }
+            };
+        } else if (trimmedLine === '---') {
+            block = {
+                object: 'block',
+                type: 'divider',
+                divider: {}
+            };
+        } else {
+            block = {
+                object: 'block',
+                type: 'paragraph',
+                paragraph: {
+                    rich_text: this.parseMarkdownToRichText(trimmedLine)
+                }
+            };
+        }
+        
+        return block ? { block, newIndex } : null;
+    }
+    
     private convertMarkdownToBlocks(markdown: string): any[] {
         const lines = markdown.split('\n');
         const blocks = [];
@@ -686,6 +904,16 @@ ${content}`;
             const line = lines[i].trim();
             
             if (!line) {
+                i++;
+                continue;
+            }
+            
+            // Skip database/view placeholders - these are preserved separately
+            if (line.startsWith('[Database:') || 
+                line === '[Linked Page/Database View]' ||
+                line === '[Synced Block]' ||
+                line === '[Table]' ||
+                line === '[Column Layout]') {
                 i++;
                 continue;
             }
@@ -818,65 +1046,97 @@ ${content}`;
     }
 
     private parseMarkdownToRichText(text: string): any[] {
-        const richTextArray: any[] = [];
-        
-        // Regular expressions for different formatting (in order of precedence)
-        const patterns = [
-            { regex: /\*\*(.*?)\*\*/g, annotation: 'bold' },
-            { regex: /\*(.*?)\*/g, annotation: 'italic' },
-            { regex: /<u>(.*?)<\/u>/g, annotation: 'underline' },
-            { regex: /~~(.*?)~~/g, annotation: 'strikethrough' },
-            { regex: /`(.*?)`/g, annotation: 'code' }
-        ];
-        
-        // Check if there's any formatting
-        let hasFormatting = false;
-        for (const pattern of patterns) {
-            if (pattern.regex.test(text)) {
-                hasFormatting = true;
-                break;
-            }
-        }
-        
-        if (!hasFormatting) {
+        // Simple approach: just return plain text if no formatting detected
+        // This avoids complex regex issues
+        if (!text.includes('*') && !text.includes('_') && !text.includes('`') && 
+            !text.includes('~') && !text.includes('<u>')) {
             return [{ type: 'text', text: { content: text } }];
         }
         
-        // Parse text with formatting
-        let remainingText = text;
-        let currentPos = 0;
+        // For now, use a simplified approach that handles basic cases
+        // Parse bold and italic separately to avoid conflicts
+        const richTextArray: any[] = [];
         
-        // Find all matches and their positions
-        const matches: Array<{start: number, end: number, content: string, annotation: string}> = [];
+        // Simple pattern matching - handle bold first (double asterisk)
+        const boldPattern = /\*\*(.+?)\*\*/g;
+        const italicPattern = /(?<!\*)\*(?!\*)(.+?)\*(?!\*)/g;
+        const codePattern = /`(.+?)`/g;
+        const strikePattern = /~~(.+?)~~/g;
         
-        for (const pattern of patterns) {
-            const regex = new RegExp(pattern.regex.source, 'g');
-            let match;
-            while ((match = regex.exec(text)) !== null) {
+        // Collect all matches with their positions
+        const matches: Array<{start: number, end: number, text: string, type: string}> = [];
+        
+        let match: RegExpExecArray | null;
+        // Find bold
+        boldPattern.lastIndex = 0;
+        while ((match = boldPattern.exec(text)) !== null) {
+            matches.push({
+                start: match.index,
+                end: match.index + match[0].length,
+                text: match[1],
+                type: 'bold'
+            });
+        }
+        
+        // Find code (before italic to prevent conflicts)
+        codePattern.lastIndex = 0;
+        while ((match = codePattern.exec(text)) !== null) {
+            matches.push({
+                start: match.index,
+                end: match.index + match[0].length,
+                text: match[1],
+                type: 'code'
+            });
+        }
+        
+        // Find italic (after bold to avoid conflicts)
+        italicPattern.lastIndex = 0;
+        while ((match = italicPattern.exec(text)) !== null) {
+            // Skip if this overlaps with bold or code
+            const matchStart = match.index;
+            const matchEnd = match.index + match[0].length;
+            const overlaps = matches.some(m => 
+                (matchStart >= m.start && matchStart < m.end) ||
+                (matchEnd > m.start && matchEnd <= m.end)
+            );
+            if (!overlaps) {
                 matches.push({
-                    start: match.index,
-                    end: match.index + match[0].length,
-                    content: match[1], // The captured content without markers
-                    annotation: pattern.annotation
+                    start: matchStart,
+                    end: matchEnd,
+                    text: match[1],
+                    type: 'italic'
                 });
             }
         }
         
-        // Sort matches by start position
-        matches.sort((a, b) => a.start - b.start);
-        
-        // If no matches found after parsing, return plain text
-        if (matches.length === 0) {
-            return [{ type: 'text', text: { content: text } }];
+        // Find strikethrough
+        strikePattern.lastIndex = 0;
+        while ((match = strikePattern.exec(text)) !== null) {
+            const matchStart = match.index;
+            const matchEnd = match.index + match[0].length;
+            const overlaps = matches.some(m => 
+                (matchStart >= m.start && matchStart < m.end) ||
+                (matchEnd > m.start && matchEnd <= m.end)
+            );
+            if (!overlaps) {
+                matches.push({
+                    start: matchStart,
+                    end: matchEnd,
+                    text: match[1],
+                    type: 'strikethrough'
+                });
+            }
         }
         
-        // Build rich text array
-        let lastEnd = 0;
+        // Sort matches by position
+        matches.sort((a, b) => a.start - b.start);
         
-        for (const match of matches) {
+        // Build the rich text array
+        let currentPos = 0;
+        for (const m of matches) {
             // Add plain text before this match
-            if (match.start > lastEnd) {
-                const plainText = text.substring(lastEnd, match.start);
+            if (m.start > currentPos) {
+                const plainText = text.substring(currentPos, m.start);
                 if (plainText) {
                     richTextArray.push({
                         type: 'text',
@@ -885,22 +1145,21 @@ ${content}`;
                 }
             }
             
-            // Add formatted text
+            // Add the formatted text
             const annotations: any = {};
-            annotations[match.annotation] = true;
-            
+            annotations[m.type] = true;
             richTextArray.push({
                 type: 'text',
-                text: { content: match.content },
+                text: { content: m.text },
                 annotations: annotations
             });
             
-            lastEnd = match.end;
+            currentPos = m.end;
         }
         
         // Add any remaining plain text
-        if (lastEnd < text.length) {
-            const remainingText = text.substring(lastEnd);
+        if (currentPos < text.length) {
+            const remainingText = text.substring(currentPos);
             if (remainingText) {
                 richTextArray.push({
                     type: 'text',
@@ -917,6 +1176,337 @@ ${content}`;
         return richTextArray;
     }
 
+    private convertBlocksToMarkdownWithMetadata(blocks: any[]): string {
+        let markdown = '';
+        
+        for (const block of blocks) {
+            if (!('id' in block) || !('type' in block)) continue;
+            
+            // Only add block ID markers for preserved block types
+            const isPreservedBlock = block.type === 'child_database' || 
+                                     block.type === 'link_to_page' ||
+                                     block.type === 'synced_block' ||
+                                     block.type === 'table' ||
+                                     block.type === 'column_list' ||
+                                     block.type === 'child_page';
+            
+            if (isPreservedBlock) {
+                // Add hidden block ID marker for preserved blocks only
+                markdown += `<!-- BLOCK_ID: ${block.id} TYPE: ${block.type} -->\n`;
+                // Don't add any placeholder text - just the marker
+                continue;
+            }
+            
+            switch (block.type) {
+                case 'paragraph':
+                    if (block.paragraph?.rich_text) {
+                        markdown += this.extractTextFromRichText(block.paragraph.rich_text) + '\n\n';
+                    }
+                    break;
+                case 'heading_1':
+                    if (block.heading_1?.rich_text) {
+                        markdown += '# ' + this.extractTextFromRichText(block.heading_1.rich_text) + '\n\n';
+                    }
+                    break;
+                case 'heading_2':
+                    if (block.heading_2?.rich_text) {
+                        markdown += '## ' + this.extractTextFromRichText(block.heading_2.rich_text) + '\n\n';
+                    }
+                    break;
+                case 'heading_3':
+                    if (block.heading_3?.rich_text) {
+                        markdown += '### ' + this.extractTextFromRichText(block.heading_3.rich_text) + '\n\n';
+                    }
+                    break;
+                case 'bulleted_list_item':
+                    if (block.bulleted_list_item?.rich_text) {
+                        markdown += '- ' + this.extractTextFromRichText(block.bulleted_list_item.rich_text) + '\n';
+                    }
+                    break;
+                case 'numbered_list_item':
+                    if (block.numbered_list_item?.rich_text) {
+                        markdown += '1. ' + this.extractTextFromRichText(block.numbered_list_item.rich_text) + '\n';
+                    }
+                    break;
+                case 'code':
+                    if (block.code?.rich_text) {
+                        const language = block.code.language || '';
+                        const code = this.extractTextFromRichText(block.code.rich_text);
+                        markdown += `\`\`\`${language}\n${code}\n\`\`\`\n\n`;
+                    }
+                    break;
+                case 'quote':
+                    if (block.quote?.rich_text) {
+                        markdown += '> ' + this.extractTextFromRichText(block.quote.rich_text) + '\n\n';
+                    }
+                    break;
+                case 'divider':
+                    markdown += '---\n\n';
+                    break;
+                default:
+                    console.log(`Unknown block type: ${block.type}`);
+                    break;
+            }
+        }
+        
+        return markdown.trim();
+    }
+
+    private parseMarkdownWithBlockMetadata(content: string): Array<{blockId?: string, blockType?: string, content: string}> {
+        const lines = content.split('\n');
+        const blocks: Array<{blockId?: string, blockType?: string, content: string}> = [];
+        let currentBlock: {blockId?: string, blockType?: string, content: string} = {content: ''};
+        
+        for (let i = 0; i < lines.length; i++) {
+            const line = lines[i];
+            
+            // Check for block metadata marker
+            const blockMatch = line.match(/^<!-- BLOCK_ID: ([a-f0-9-]+) TYPE: ([a-z_]+) -->$/);
+            if (blockMatch) {
+                // Save previous block if it has content
+                if (currentBlock.content.trim() || currentBlock.blockId) {
+                    blocks.push(currentBlock);
+                }
+                // Start new block
+                currentBlock = {
+                    blockId: blockMatch[1],
+                    blockType: blockMatch[2],
+                    content: ''
+                };
+            } else {
+                // Add line to current block content
+                currentBlock.content += line + '\n';
+            }
+        }
+        
+        // Add last block
+        if (currentBlock.content.trim() || currentBlock.blockId) {
+            blocks.push(currentBlock);
+        }
+        
+        return blocks;
+    }
+
+    private createBlockFromParsedContent(content: string): any | null {
+        const trimmedContent = content.trim();
+        if (!trimmedContent) return null;
+        
+        // Skip placeholders
+        if (trimmedContent.startsWith('[Database:') || 
+            trimmedContent === '[Linked Page/Database View]' ||
+            trimmedContent === '[Synced Block]' ||
+            trimmedContent === '[Table]' ||
+            trimmedContent === '[Column Layout]' ||
+            trimmedContent === '[Child Page]' ||
+            trimmedContent.startsWith('[Unknown:')) {
+            return null;
+        }
+        
+        // Parse content and create appropriate block
+        const lines = trimmedContent.split('\n');
+        const firstLine = lines[0].trim();
+        
+        if (firstLine.startsWith('# ')) {
+            return {
+                object: 'block',
+                type: 'heading_1',
+                heading_1: {
+                    rich_text: this.parseMarkdownToRichText(firstLine.substring(2))
+                }
+            };
+        } else if (firstLine.startsWith('## ')) {
+            return {
+                object: 'block',
+                type: 'heading_2',
+                heading_2: {
+                    rich_text: this.parseMarkdownToRichText(firstLine.substring(3))
+                }
+            };
+        } else if (firstLine.startsWith('### ')) {
+            return {
+                object: 'block',
+                type: 'heading_3',
+                heading_3: {
+                    rich_text: this.parseMarkdownToRichText(firstLine.substring(4))
+                }
+            };
+        } else if (firstLine.startsWith('- ') || firstLine.startsWith('* ')) {
+            return {
+                object: 'block',
+                type: 'bulleted_list_item',
+                bulleted_list_item: {
+                    rich_text: this.parseMarkdownToRichText(firstLine.substring(2))
+                }
+            };
+        } else if (firstLine.match(/^\d+\.\s/)) {
+            return {
+                object: 'block',
+                type: 'numbered_list_item',
+                numbered_list_item: {
+                    rich_text: this.parseMarkdownToRichText(firstLine.replace(/^\d+\.\s/, ''))
+                }
+            };
+        } else if (firstLine.startsWith('```')) {
+            // Handle code blocks
+            const language = firstLine.substring(3);
+            const codeLines = [];
+            for (let i = 1; i < lines.length; i++) {
+                if (lines[i] === '```') break;
+                codeLines.push(lines[i]);
+            }
+            return {
+                object: 'block',
+                type: 'code',
+                code: {
+                    language: language || 'plain text',
+                    rich_text: [{ type: 'text', text: { content: codeLines.join('\n') } }]
+                }
+            };
+        } else if (firstLine.startsWith('> ')) {
+            return {
+                object: 'block',
+                type: 'quote',
+                quote: {
+                    rich_text: this.parseMarkdownToRichText(firstLine.substring(2))
+                }
+            };
+        } else if (firstLine === '---') {
+            return {
+                object: 'block',
+                type: 'divider',
+                divider: {}
+            };
+        } else if (trimmedContent) {
+            return {
+                object: 'block',
+                type: 'paragraph',
+                paragraph: {
+                    rich_text: this.parseMarkdownToRichText(trimmedContent.replace(/\n\n$/, ''))
+                }
+            };
+        }
+        
+        return null;
+    }
+
+    private createNotebookFromContent(pageId: string, title: string, content: string): any {
+        const lines = content.split('\n');
+        const cells: any[] = [];
+        let currentCell: string[] = [];
+        let currentBlockId: string | null = null;
+        let currentBlockType: string | null = null;
+        
+        // Add title cell
+        cells.push({
+            cell_type: 'markdown',
+            metadata: {
+                notion_page_id: pageId,
+                is_title: true
+            },
+            source: [`# ${title}`]
+        });
+        
+        for (let i = 0; i < lines.length; i++) {
+            const line = lines[i];
+            
+            // Check for block ID marker
+            const blockMatch = line.match(/^<!-- BLOCK_ID: ([a-f0-9-]+) TYPE: (\w+) -->$/);
+            if (blockMatch) {
+                // Save current cell if exists
+                if (currentCell.length > 0) {
+                    const cellContent = currentCell.join('\n').trim();
+                    if (cellContent) {
+                        cells.push(this.createNotebookCell(cellContent, currentBlockId, currentBlockType));
+                    }
+                    currentCell = [];
+                }
+                
+                // Start new preserved block
+                currentBlockId = blockMatch[1];
+                currentBlockType = blockMatch[2];
+                continue;
+            }
+            
+            // Check if we need to start a new cell (empty line after content)
+            if (line.trim() === '' && currentCell.length > 0 && !currentBlockId) {
+                // End current cell on empty line
+                const cellContent = currentCell.join('\n').trim();
+                if (cellContent) {
+                    cells.push(this.createNotebookCell(cellContent, currentBlockId, currentBlockType));
+                }
+                currentCell = [];
+                currentBlockId = null;
+                currentBlockType = null;
+                continue;
+            }
+            
+            currentCell.push(line);
+        }
+        
+        // Add final cell if exists
+        if (currentCell.length > 0) {
+            const cellContent = currentCell.join('\n').trim();
+            if (cellContent) {
+                cells.push(this.createNotebookCell(cellContent, currentBlockId, currentBlockType));
+            }
+        }
+        
+        return {
+            cells: cells,
+            metadata: {
+                kernelspec: {
+                    display_name: 'Notion',
+                    language: 'markdown',
+                    name: 'notion'
+                },
+                language_info: {
+                    name: 'markdown',
+                    version: '1.0'
+                },
+                notion_page_id: pageId
+            },
+            nbformat: 4,
+            nbformat_minor: 4
+        };
+    }
+    
+    private createNotebookCell(content: string, blockId: string | null, blockType: string | null): any {
+        // For database and special blocks
+        if (blockId && blockType) {
+            return {
+                cell_type: 'raw',
+                metadata: {
+                    notion_block_id: blockId,
+                    notion_block_type: blockType
+                },
+                source: content.split('\n')
+            };
+        }
+        
+        // Check if this is a code block
+        if (content.startsWith('```')) {
+            const lines = content.split('\n');
+            const language = lines[0].substring(3) || 'python';
+            const code = lines.slice(1, -1).join('\n');
+            return {
+                cell_type: 'code',
+                execution_count: null,
+                metadata: {
+                    language: language
+                },
+                outputs: [],
+                source: code.split('\n')
+            };
+        }
+        
+        // Default to markdown cell
+        return {
+            cell_type: 'markdown',
+            metadata: {},
+            source: content.split('\n')
+        };
+    }
+    
     private sanitizeFileName(filename: string): string {
         return filename
             .replace(/[<>:"/\\|?*]/g, '_')
